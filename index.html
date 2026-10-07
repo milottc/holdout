@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -115,6 +114,7 @@ function reset() {
 }
 
 function start() {
+  Board.refresh();
   initAudio();
   reset();
   state = 'play';
@@ -289,6 +289,7 @@ function die() {
     best = score; newBest = true;
     try { localStorage.setItem('holdout_best', String(best)); } catch (e) {}
   }
+  Board.onGameOver(score, wave, kills);
 }
 
 function nova() {
@@ -833,7 +834,7 @@ function drawMenu() {
   ctx.globalAlpha = pulse;
   txt('Click or press Enter to start', W / 2, 510, 32, '#ffe27a', 'center');
   ctx.globalAlpha = 1;
-  if (best > 0) txt('Best score ' + best, W / 2, 552, 20, '#9aa0d6', 'center', 500);
+  Board.draw(548, 3);
 }
 
 function drawOver() {
@@ -849,6 +850,7 @@ function drawOver() {
     txt('Click or press R to play again', W / 2, 440, 30, '#ffe27a', 'center');
     ctx.globalAlpha = 1;
   }
+  Board.draw(480, 5);
 }
 
 function drawPause() {
@@ -880,6 +882,99 @@ function draw() {
   else if (state === 'pause') drawPause();
 }
 
+/* ---------- leaderboard (localStorage + JSONBin) ---------- */
+const Board = (() => {
+  const BIN_ID = '6ac67438ac6210605a1cf2de';
+  const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
+  const URL = 'https://api.jsonbin.io/v3/b/' + BIN_ID;
+  const MAX = 10;
+  const online = !BIN_ID.startsWith('YOUR_');
+  let local = load('holdout_scores');
+  let remote = [];
+  let status = online ? 'Loading' : 'This device only';
+  let mine = null;
+  let lastName = '';
+  try { lastName = localStorage.getItem('holdout_name') || ''; } catch (e) {}
+
+  function load(k) {
+    try { return clean(JSON.parse(localStorage.getItem(k))); } catch (e) { return []; }
+  }
+  function clean(a) {
+    if (!Array.isArray(a)) return [];
+    return a.filter(s => s && typeof s.score === 'number' && isFinite(s.score))
+      .map(s => ({ id: String(s.id || ''), name: String(s.name || 'Player').slice(0, 12),
+                   score: Math.floor(s.score), wave: s.wave | 0, kills: s.kills | 0 }));
+  }
+  function merge(...lists) {
+    const seen = new Set(), out = [];
+    for (const s of lists.flat().sort((a, b) => b.score - a.score)) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id); out.push(s);
+    }
+    return out.slice(0, MAX);
+  }
+  const hdr = extra => Object.assign({ 'X-Access-Key': KEY }, extra || {});
+
+  async function refresh() {
+    if (!online) return;
+    try {
+      const r = await fetch(URL + '/latest', { headers: hdr() });
+      if (!r.ok) throw new Error(r.status);
+      remote = merge(clean((await r.json()).record.scores));
+      status = 'Online';
+    } catch (e) { status = 'Offline'; }
+  }
+
+  async function submit(entry) {
+    local = merge(local, [entry]);
+    try { localStorage.setItem('holdout_scores', JSON.stringify(local)); } catch (e) {}
+    if (!online) return;
+    status = 'Saving';
+    try {
+      // read, merge, write, so two players finishing at once do not erase each other
+      const r = await fetch(URL + '/latest', { headers: hdr() });
+      if (!r.ok) throw new Error(r.status);
+      const next = merge(clean((await r.json()).record.scores), [entry]);
+      const w = await fetch(URL, { method: 'PUT', headers: hdr({ 'Content-Type': 'application/json' }),
+                                   body: JSON.stringify({ scores: next }) });
+      if (!w.ok) throw new Error(w.status);
+      remote = next; status = 'Online';
+    } catch (e) { status = 'Offline, saved on this device'; }
+  }
+
+  function onGameOver(score, wave, kills) {
+    if (score <= 0) return;
+    setTimeout(() => {
+      let name = null;
+      try { name = prompt('Score ' + score + '. Enter a name for the leaderboard (Cancel to skip):', lastName); } catch (e) {}
+      if (name === null || name === undefined) return;
+      name = name.trim().slice(0, 12) || 'Player';
+      lastName = name;
+      try { localStorage.setItem('holdout_name', name); } catch (e) {}
+      mine = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      submit({ id: mine, name, score, wave, kills });
+    }, 700);
+  }
+
+  function list() { return merge(remote, local); }
+
+  function draw(y, n) {
+    const rows = list().slice(0, n), cx = W / 2;
+    txt('Leaderboard', cx - 170, y, 20, '#6ff2d6', 'left');
+    txt(status, cx + 170, y, 14, '#9aa0d6', 'right', 500);
+    if (!rows.length) { txt('No scores yet', cx, y + 24, 18, '#9aa0d6', 'center', 500); return; }
+    rows.forEach((s, i) => {
+      const yy = y + 24 + i * 22, col = s.id === mine ? '#ffe27a' : '#e8ebff';
+      txt(String(i + 1), cx - 150, yy, 18, '#9aa0d6', 'right', 500);
+      txt(s.name, cx - 136, yy, 18, col, 'left');
+      txt(String(s.score), cx + 90, yy, 18, col, 'right');
+      txt('W' + s.wave, cx + 170, yy, 16, '#9aa0d6', 'right', 500);
+    });
+  }
+
+  return { refresh, onGameOver, draw };
+})();
+
 /* ---------- loop ---------- */
 let last = performance.now();
 function frame(now) {
@@ -896,6 +991,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+Board.refresh();
 reset();
 parts = [];
 requestAnimationFrame(frame);
@@ -903,4 +999,3 @@ requestAnimationFrame(frame);
 </script>
 </body>
 </html>
-
