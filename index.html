@@ -886,7 +886,8 @@ function draw() {
 const Board = (() => {
   const BIN_ID = '6ac67438ac6210605a1cf2de';
   const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
-  const URL = 'https://api.jsonbin.io/v3/b/' + 6ac67438ac6210605a1cf2de;
+
+const URL = 'https://api.jsonbin.io/v3/b/' + BIN_ID;
   const MAX = 10;
   const online = !BIN_ID.startsWith('YOUR_');
   let local = load('holdout_scores');
