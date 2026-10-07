@@ -996,7 +996,7 @@ const Board = (() => {
     }
     return out.slice(0, MAX);
   }
-  const hdr = extra => Object.assign({ 'X-Access-Key': KEY }, extra || {});
+  const hdr = extra => Object.assign({ 'X-Master-Key': KEY }, extra || {});
 
   async function refresh() {
     if (!online) return;
