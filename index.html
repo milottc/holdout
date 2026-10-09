@@ -754,7 +754,6 @@ function update(dt) {
         break;
       }
     }
-    /* ghosts can be shot for sport */
     if (!b.dead) {
       for (const g of ghosts) {
         if (b.hits.includes(g)) continue;
@@ -1099,7 +1098,6 @@ function drawHUD() {
     });
   }
 
-  /* Boss bar (supports multiple bosses) */
   const bosses = enemies.filter(e => e.boss && !e.dead && e.spawn <= 0);
   if (bosses.length > 0) {
     txt(bosses.length > 1 ? 'Bosses x' + bosses.length : 'Boss', W / 2, H - 44, 16, '#ff3d81', 'center');
@@ -1110,7 +1108,6 @@ function drawHUD() {
     });
   }
 
-  /* PvP match timer */
   if (mode === 'pvp' && state === 'play') {
     const mins = Math.floor(matchTimer / 60);
     const secs = Math.floor(matchTimer % 60).toString().padStart(2, '0');
@@ -1540,11 +1537,13 @@ let lobbyCode = '', lobbyIsHost = false, lobbyHostId = '', lobbyPlayers = [], lo
 let lobbySyncT = 0, lobbySyncing = false, lobbyPollT = 0, lobbyLastMatch = '';
 let ghosts = [];
 
+/* These are module-level so applyLobby() (which lives outside the Lobby IIFE) can read them */
+const OFFLINE_MS = 30000, MAXP = 8;
+
 const Lobby = (() => {
   const URL = 'https://api.jsonbin.io/v3/b/6ac67438ac6210605a1cf2de';
   const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
   const hdr = extra => Object.assign({ 'X-Master-Key': KEY }, extra || {});
-  const OFFLINE_MS = 30000, MAXP = 8;
   const myId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
   async function readRec() {
