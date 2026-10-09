@@ -92,9 +92,21 @@ const DEF = {
   runner:   { r: 9,  hp: 1,  sp: 150, score: 120,  col: '#ffa94d', dmg: 8 },
   tank:     { r: 19, hp: 12, sp: 42,  score: 300,  col: '#b07cff', dmg: 18 },
   spitter:  { r: 12, hp: 4,  sp: 60,  score: 200,  col: '#7be07b', dmg: 8 },
-  boss:     { r: 38, hp: 0,  sp: 45,  score: 2000, col: '#ff3d81', dmg: 25 },
-  megaBoss: { r: 55, hp: 0,  sp: 35,  score: 5000, col: '#ff00ff', dmg: 35 }
+  boss:     { r: 38, hp: 0,  sp: 45,  score: 2000, col: '#ff3d81', dmg: 25 }
 };
+/* 8 boss types, one every 4 waves, cycling in order */
+const BOSSES = [
+  { name: 'Brute',    col: '#ff3d81', r: 38, hpm: 1.0,  n: 10, k: 0.85, charges: true,  tele: 0.8 },
+  { name: 'Sniper',   col: '#5cc8ff', r: 30, hpm: 0.8,  n: 3,  k: 0.5,  charges: false, tele: 0.8 },
+  { name: 'Summoner', col: '#7be07b', r: 42, hpm: 1.1,  n: 6,  k: 0.7,  charges: false, tele: 0.8 },
+  { name: 'Spiral',   col: '#b07cff', r: 36, hpm: 1.0,  n: 5,  k: 0.55, charges: false, tele: 0.8 },
+  { name: 'Charger',  col: '#ffa94d', r: 34, hpm: 1.1,  n: 4,  k: 0.6,  charges: true,  tele: 0.55 },
+  { name: 'Shotgun',  col: '#ffe27a', r: 40, hpm: 1.1,  n: 7,  k: 0.75, charges: false, tele: 0.8 },
+  { name: 'Blinker',  col: '#e0e6ff', r: 32, hpm: 0.9,  n: 8,  k: 0.9,  charges: false, tele: 0.8 },
+  { name: 'Warlord',  col: '#ff00ff', r: 52, hpm: 1.6,  n: 12, k: 0.8,  charges: true,  tele: 0.8 }
+];
+const NOACID_TANK = 'thetank';
+const acidOn = () => upg[5] > 0 && eqT !== NOACID_TANK;
 const PICK = {
   health: { col: '#6dff9c', ch: '+' },
   rapid:  { col: '#ffe27a', ch: 'R' },
@@ -158,7 +170,7 @@ const UPG = [
   { name: 'Trigger',      desc: '+5% fire rate',               base: 150 },
   { name: 'Dash drive',   desc: '-7% dash cooldown',           base: 120 },
   { name: 'Flamethrower', desc: 'Rounds ignite: +1 burn dmg/s', base: 260 },
-  { name: 'Acid rounds',  desc: 'Rounds corrode: +1 acid dmg/s', base: 260 }
+  { name: 'Acid rounds',  desc: '+1 acid dmg/s, not on The Tank', base: 260 }
 ];
 const MAXUPG = 5;
 const upgCost = i => UPG[i].base * (upg[i] + 1);
@@ -268,19 +280,15 @@ function nextWave() {
     return;
   }
 
-  const isBoss = wave % 3 === 0;
-  const isMega = wave % 10 === 0;
-  banner = isMega ? 'Wave ' + wave + ': MEGA BOSS' : isBoss ? 'Wave ' + wave + ': Boss' : 'Wave ' + wave;
+  const isBoss = wave % 4 === 0;
+  const bi0 = (Math.floor(wave / 4) - 1) % BOSSES.length;
+  banner = isBoss ? 'Wave ' + wave + ': ' + BOSSES[bi0].name : 'Wave ' + wave;
   bannerT = 2.2;
 
-  if (isMega) {
-    queue.push({ type: 'megaBoss', at: 0 });
-    const n = Math.floor(wave * 2);
-    for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.6 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
-  } else if (isBoss) {
-    const bossCount = Math.max(1, Math.floor(wave / 6));
+  if (isBoss) {
+    const bossCount = Math.max(1, Math.floor(wave / 16));
     for (let b = 0; b < bossCount; b++) {
-      queue.push({ type: 'boss', at: b * 1.5 });
+      queue.push({ type: 'boss', bi: (bi0 + b) % BOSSES.length, at: b * 1.5 });
     }
     const n = Math.floor(wave * 1.5);
     for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.7 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
@@ -291,10 +299,11 @@ function nextWave() {
   }
 }
 
-function spawnEnemy(type) {
+function spawnEnemy(type, bi) {
   const d = DEF[type];
+  const B = type === 'boss' ? BOSSES[bi || 0] : null;
   let x = W / 2, y = 110;
-  if (type !== 'boss' && type !== 'megaBoss') {
+  if (!B) {
     for (let tries = 0; tries < 8; tries++) {
       const s = Math.floor(Math.random() * 4);
       if (s === 0) { x = rnd(30, W - 30); y = 30; }
@@ -304,15 +313,14 @@ function spawnEnemy(type) {
       if (Math.hypot(x - P.x, y - P.y) > 200) break;
     }
   }
-  const col = d.col;
-  const hp = type === 'megaBoss' ? 250 + wave * 25
-           : type === 'boss' ? 70 + wave * 15
+  const col = B ? B.col : d.col;
+  const hp = B ? Math.ceil((70 + wave * 15) * B.hpm)
            : Math.ceil(d.hp * (1 + wave * 0.05));
   enemies.push({
-    type, col, boss: type === 'boss' || type === 'megaBoss',
-    x, y, r: d.r, hp, max: hp, sp: d.sp, dmg: d.dmg,
-    spawn: type === 'boss' ? 1.2 : type === 'megaBoss' ? 1.8 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
-    ringCd: 2, aimCd: 1, chargeCd: 5, tele: 0, charge: 0, cx: 0, cy: 0, rot: 0, t: 0, dead: false,
+    type, col, boss: !!B, bi: bi || 0, bname: B ? B.name : '', bt: 0, bt2: 0,
+    x, y, r: B ? B.r : d.r, hp, max: hp, sp: d.sp, dmg: d.dmg,
+    spawn: B ? 1.2 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
+    ringCd: 2, aimCd: 1, chargeCd: B && B.charges ? (B.name === 'Charger' ? 2.5 : 5) : 99999, tele: 0, charge: 0, cx: 0, cy: 0, rot: 0, t: 0, dead: false,
     burn: 0, burnDps: 0, acid: 0, acidDps: 0
   });
 }
@@ -335,7 +343,7 @@ function eb(x, y, vx, vy) {
 /* ---------- combat ---------- */
 function fire() {
   const a = P.ang, lvl = weaponLevel(), sp = 620;
-  const burn = upg[4], acid = upg[5];
+  const burn = upg[4], acid = acidOn() ? upg[5] : 0;
   const add = (off, lat) => {
     const aa = a + off;
     bullets.push({
@@ -390,7 +398,7 @@ function killEnemy(e) {
     ebullets = [];
     pickups.push({ x: e.x - 24, y: e.y, type: 'health', life: 14, dead: false });
     pickups.push({ x: e.x + 24, y: e.y, type: 'nova', life: 14, dead: false });
-    if (e.type === 'megaBoss') {
+    if (e.bi >= 4) {
       pickups.push({ x: e.x, y: e.y - 24, type: 'rapid', life: 14, dead: false });
       pickups.push({ x: e.x, y: e.y + 24, type: 'shield', life: 14, dead: false });
     }
@@ -451,41 +459,131 @@ function nova() {
 }
 
 /* ---------- boss ---------- */
+function bossRing(e, n, sp, rot) {
+  for (let i = 0; i < n; i++) {
+    const a = rot + i / n * TAU;
+    eb(e.x, e.y, Math.cos(a) * sp, Math.sin(a) * sp);
+  }
+}
+function bossAimed(e, base, offs, sp) {
+  for (const o of offs) eb(e.x, e.y, Math.cos(base + o) * sp, Math.sin(base + o) * sp);
+}
+function bossSummon(e, type, n) {
+  for (let i = 0; i < n; i++) {
+    if (enemies.length > 30) return;
+    spawnEnemy(type);
+    const m = enemies[enemies.length - 1];
+    m.x = clamp(e.x + rnd(-50, 50), 20, W - 20); m.y = clamp(e.y + rnd(-50, 50), 20, H - 20);
+  }
+}
 function bossAI(e, dt, nx, ny) {
   const rage = e.hp < e.max * 0.5;
+  const B = BOSSES[e.bi];
+  const d = Math.hypot(P.x - e.x, P.y - e.y);
+  const base = Math.atan2(ny, nx);
   e.t += dt;
   if (e.tele > 0) {
     e.tele -= dt;
     e.cx = nx; e.cy = ny;
-    if (e.tele <= 0) { e.charge = 0.7; snd(80, 0.5, 'sawtooth', 0.09, 200); }
+    if (e.tele <= 0) { e.charge = B.name === 'Charger' ? 0.55 : 0.7; snd(80, 0.5, 'sawtooth', 0.09, 200); }
   } else if (e.charge > 0) {
     e.charge -= dt;
-    e.x += e.cx * 430 * dt; e.y += e.cy * 430 * dt;
-    burst(e.x, e.y, e.col || '#ff3d81', 1, 60, 0.3, 6);
+    e.x += e.cx * (B.name === 'Charger' ? 560 : 430) * dt; e.y += e.cy * (B.name === 'Charger' ? 560 : 430) * dt;
+    burst(e.x, e.y, e.col, 1, 60, 0.3, 6);
+    if (e.charge <= 0 && B.name === 'Charger') bossRing(e, rage ? 14 : 10, 190, e.rot += 0.2);
   } else {
-    const sp = rage ? 62 : 45;
-    e.x += nx * sp * dt; e.y += ny * sp * dt;
-    e.ringCd -= dt;
-    if (e.ringCd <= 0) {
-      e.ringCd = rage ? 1.6 : 2.3;
-      const n = rage ? 18 : 12;
-      e.rot += 0.3;
-      for (let i = 0; i < n; i++) {
-        const a = e.rot + i / n * TAU;
-        eb(e.x, e.y, Math.cos(a) * 170, Math.sin(a) * 170);
+    switch (B.name) {
+      case 'Brute': {
+        const sp = rage ? 62 : 45;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 1.6 : 2.3; e.rot += 0.3; bossRing(e, rage ? 18 : 12, 170, e.rot); snd(140, 0.3, 'square', 0.06, -60); }
+        if (rage) { e.aimCd -= dt; if (e.aimCd <= 0) { e.aimCd = 1.1; bossAimed(e, base, [-0.25, 0, 0.25], 260); } }
+        break;
       }
-      snd(140, 0.3, 'square', 0.06, -60);
-    }
-    if (rage) {
-      e.aimCd -= dt;
-      if (e.aimCd <= 0) {
-        e.aimCd = 1.1;
-        const base = Math.atan2(ny, nx);
-        for (const o of [-0.25, 0, 0.25]) eb(e.x, e.y, Math.cos(base + o) * 260, Math.sin(base + o) * 260);
+      case 'Sniper': {
+        const m = d < 280 ? -1 : d > 380 ? 1 : 0;
+        const sp = rage ? 85 : 65;
+        e.x += nx * m * sp * dt - ny * 25 * dt; e.y += ny * m * sp * dt + nx * 25 * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) {
+          e.aimCd = rage ? 0.8 : 1.3;
+          bossAimed(e, base, rage ? [-0.08, 0.08] : [0], 400);
+          snd(700, 0.1, 'square', 0.05, -400);
+        }
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = 4; bossRing(e, 8, 150, e.rot += 0.4); }
+        break;
+      }
+      case 'Summoner': {
+        e.x += nx * 35 * dt; e.y += ny * 35 * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) { e.aimCd = rage ? 3 : 4.5; bossSummon(e, rage ? 'runner' : 'grunt', rage ? 4 : 3); snd(200, 0.3, 'triangle', 0.06, 300); }
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 2 : 3; bossRing(e, 10, 140, e.rot += 0.5); }
+        break;
+      }
+      case 'Spiral': {
+        e.x += nx * 30 * dt; e.y += ny * 30 * dt;
+        e.rot += dt * (rage ? 3.2 : 2.2);
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) {
+          e.ringCd = rage ? 0.07 : 0.1;
+          eb(e.x, e.y, Math.cos(e.rot) * 165, Math.sin(e.rot) * 165);
+          eb(e.x, e.y, Math.cos(e.rot + Math.PI) * 165, Math.sin(e.rot + Math.PI) * 165);
+          if (rage) { eb(e.x, e.y, Math.cos(e.rot + Math.PI / 2) * 165, Math.sin(e.rot + Math.PI / 2) * 165); }
+        }
+        break;
+      }
+      case 'Charger': {
+        const sp = rage ? 100 : 80;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        break;
+      }
+      case 'Shotgun': {
+        const sp = rage ? 62 : 50;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) {
+          e.aimCd = rage ? 1.2 : 1.8;
+          const offs = [];
+          const n = rage ? 9 : 7;
+          for (let i = 0; i < n; i++) offs.push((i / (n - 1) - 0.5) * 1.0);
+          bossAimed(e, base, offs, 240);
+          snd(110, 0.25, 'square', 0.07, -50);
+        }
+        break;
+      }
+      case 'Blinker': {
+        e.x += nx * 25 * dt; e.y += ny * 25 * dt;
+        e.bt -= dt;
+        if (e.bt <= 0) {
+          e.bt = rage ? 1.8 : 2.6;
+          rings.push({ x: e.x, y: e.y, r: e.r, max: e.r + 60, t: 0, dur: 0.3, col: e.col });
+          const a = rnd(0, TAU), dist = rnd(150, 260);
+          e.x = clamp(P.x + Math.cos(a) * dist, e.r, W - e.r);
+          e.y = clamp(P.y + Math.sin(a) * dist, e.r, H - e.r);
+          rings.push({ x: e.x, y: e.y, r: e.r + 60, max: e.r, t: 0, dur: 0.3, col: e.col });
+          bossRing(e, rage ? 16 : 12, 190, rnd(0, TAU));
+          bossAimed(e, Math.atan2(P.y - e.y, P.x - e.x), [0], 300);
+          snd(900, 0.15, 'sine', 0.06, -600);
+        }
+        break;
+      }
+      case 'Warlord': {
+        const sp = rage ? 55 : 42;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 1.8 : 2.5; e.rot += 0.25; bossRing(e, rage ? 20 : 14, 170, e.rot); snd(140, 0.3, 'square', 0.06, -60); }
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) { e.aimCd = rage ? 1.0 : 1.6; bossAimed(e, base, rage ? [-0.3, -0.15, 0, 0.15, 0.3] : [-0.2, 0, 0.2], 270); }
+        e.bt2 -= dt;
+        if (e.bt2 <= 0) { e.bt2 = rage ? 4.5 : 6.5; bossSummon(e, 'grunt', rage ? 4 : 2); }
+        break;
       }
     }
     e.chargeCd -= dt;
-    if (e.chargeCd <= 0) { e.chargeCd = rage ? 4 : 6; e.tele = 0.8; }
+    if (e.chargeCd <= 0 && B.charges) { e.chargeCd = B.name === 'Charger' ? (rage ? 1.6 : 2.4) : (rage ? 4 : 6); e.tele = B.tele; }
   }
   e.x = clamp(e.x, e.r, W - e.r);
   e.y = clamp(e.y, e.r, H - e.r);
@@ -681,7 +779,7 @@ function update(dt) {
 
   /* spawns */
   waveT += dt;
-  while (queue.length && queue[0].at <= waveT) spawnEnemy(queue.shift().type);
+  while (queue.length && queue[0].at <= waveT) { const q = queue.shift(); spawnEnemy(q.type, q.bi); };
 
   /* enemies */
   for (const e of enemies) {
@@ -914,13 +1012,13 @@ function drawEnemy(e) {
     ctx.rotate(a); ctx.fillStyle = fill; poly(4, e.r * 1.2); ctx.fill();
     ctx.fillStyle = '#1d3a1d'; ctx.beginPath(); ctx.arc(0, 0, e.r * 0.45, 0, TAU); ctx.fill();
   } else if (e.boss) {
-    const rage = e.hp < e.max * 0.5;
-    ctx.rotate(time * (rage ? 1.2 : 0.5));
-    ctx.fillStyle = fill; star(10, e.r * 1.15, e.r * 0.85); ctx.fill();
-    ctx.fillStyle = rage ? (e.type === 'megaBoss' ? '#7a0066' : '#6b0f3a') : (e.type === 'megaBoss' ? '#3a0033' : '#3a1030');
+    const rage = e.hp < e.max * 0.5, B = BOSSES[e.bi];
+    ctx.rotate(time * (rage ? 1.2 : 0.5) * (e.bi % 2 ? -1 : 1));
+    ctx.fillStyle = fill; star(B.n, e.r * 1.15, e.r * 1.15 * B.k); ctx.fill();
+    ctx.fillStyle = rage ? 'rgba(80,0,20,.7)' : 'rgba(0,0,0,.45)';
     ctx.beginPath(); ctx.arc(0, 0, e.r * 0.6, 0, TAU); ctx.fill();
-    ctx.rotate(-time * (rage ? 1.2 : 0.5));
-    ctx.fillStyle = e.tele > 0 && Math.floor(time * 20) % 2 ? '#fff' : (e.type === 'megaBoss' ? '#ff00ff' : '#ff3d81');
+    ctx.rotate(-time * (rage ? 1.2 : 0.5) * (e.bi % 2 ? -1 : 1));
+    ctx.fillStyle = e.tele > 0 && Math.floor(time * 20) % 2 ? '#fff' : e.col;
     ctx.beginPath(); ctx.arc(0, 0, e.r * 0.25, 0, TAU); ctx.fill();
   }
   ctx.restore();
@@ -1069,7 +1167,7 @@ function drawHUD() {
   if (P.rapid > 0) { txt('Rapid fire ' + P.rapid.toFixed(1) + 's', 20, ty, 16, '#ffe27a'); ty += 20; }
   if (P.shield > 0) { txt('Shield ' + P.shield.toFixed(1) + 's', 20, ty, 16, '#5cc8ff'); ty += 20; }
   if (upg[4] > 0) { txt('Flamethrower ' + upg[4], 20, ty, 16, '#ff9f43'); ty += 20; }
-  if (upg[5] > 0) { txt('Acid rounds ' + upg[5], 20, ty, 16, '#9cff57'); }
+  if (acidOn()) { txt('Acid rounds ' + upg[5], 20, ty, 16, '#9cff57'); }
 
   txt('Wave ' + wave, W / 2, 36, 28, '#e8ebff', 'center');
   const sub = lobbyCode ? ('Lobby ' + lobbyCode + ' · ' + teamName())
@@ -1100,7 +1198,7 @@ function drawHUD() {
 
   const bosses = enemies.filter(e => e.boss && !e.dead && e.spawn <= 0);
   if (bosses.length > 0) {
-    txt(bosses.length > 1 ? 'Bosses x' + bosses.length : 'Boss', W / 2, H - 44, 16, '#ff3d81', 'center');
+    txt(bosses.length > 1 ? 'Bosses x' + bosses.length : bosses[0].bname, W / 2, H - 44, 16, bosses[0].col, 'center');
     const barW = 420 / bosses.length;
     bosses.forEach((bs, i) => {
       rr((W - 420) / 2 + i * barW, H - 36, barW - 4, 12, 6); ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fill();
