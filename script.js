@@ -1,0 +1,2285 @@
+(() => {
+'use strict';
+/* ---------------- constants ---------------- */
+const W = 960, H = 640, TAU = Math.PI * 2;      // viewport (logical)
+const WW = 1920, WH = 1280;                      // world (bigger map: 2x)
+const cam = { x: 0, y: 0 };
+
+const cv = document.getElementById('g'), ctx = cv.getContext('2d');
+let scale = 1;
+
+function resize() {
+  const bw = document.body.clientWidth, bh = document.body.clientHeight;
+  const s = Math.min(bw / W, bh / H);
+  cv.style.width = W * s + 'px';
+  cv.style.height = H * s + 'px';
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = Math.round(W * s * dpr);
+  cv.height = Math.round(H * s * dpr);
+  scale = s * dpr;
+}
+addEventListener('resize', resize);
+resize();
+
+/* ---------- helpers ---------- */
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+function getPlayerName() { try { return localStorage.getItem('holdout_name') || ''; } catch (e) { return ''; } }
+function setPlayerName(n) { try { localStorage.setItem('holdout_name', n); } catch (e) {} }
+function ensureName() {
+  if (getPlayerName()) return true;
+  let n = null;
+  try { n = prompt('Choose a username (permanent, used on the leaderboard):', 'Player'); } catch (e) {}
+  if (n === null || n === undefined) return false;
+  n = String(n).trim().slice(0, 12) || 'Player';
+  setPlayerName(n);
+  return true;
+}
+
+/* ---------- audio ---------- */
+let ac = null, muted = false;
+function initAudio() {
+  if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (ac && ac.state === 'suspended') ac.resume();
+}
+function snd(f, d, type = 'square', v = 0.05, slide = 0) {
+  if (!ac || muted) return;
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t + d);
+}
+
+/* ---------- definitions ---------- */
+const DEF = {
+  grunt:    { r: 12, hp: 3,  sp: 70,  score: 100,  col: '#ff6b6b', dmg: 10 },
+  runner:   { r: 9,  hp: 1,  sp: 150, score: 120,  col: '#ffa94d', dmg: 8 },
+  tank:     { r: 19, hp: 12, sp: 42,  score: 300,  col: '#b07cff', dmg: 18 },
+  spitter:  { r: 12, hp: 4,  sp: 60,  score: 200,  col: '#7be07b', dmg: 8 },
+  boss:     { r: 38, hp: 0,  sp: 45,  score: 2000, col: '#ff3d81', dmg: 25 }
+};
+/* 8 boss types, one every 6 waves, cycling in order */
+const BOSSES = [
+  { name: 'Brute',    col: '#ff3d81', r: 38, hpm: 1.0,  n: 10, k: 0.85, charges: true,  tele: 0.8 },
+  { name: 'Sniper',   col: '#5cc8ff', r: 30, hpm: 0.8,  n: 3,  k: 0.5,  charges: false, tele: 0.8 },
+  { name: 'Summoner', col: '#7be07b', r: 42, hpm: 1.1,  n: 6,  k: 0.7,  charges: false, tele: 0.8 },
+  { name: 'Spiral',   col: '#b07cff', r: 36, hpm: 1.0,  n: 5,  k: 0.55, charges: false, tele: 0.8 },
+  { name: 'Charger',  col: '#ffa94d', r: 34, hpm: 1.1,  n: 4,  k: 0.6,  charges: true,  tele: 0.55 },
+  { name: 'Shotgun',  col: '#ffe27a', r: 40, hpm: 1.1,  n: 7,  k: 0.75, charges: false, tele: 0.8 },
+  { name: 'Blinker',  col: '#e0e6ff', r: 32, hpm: 0.9,  n: 8,  k: 0.9,  charges: false, tele: 0.8 },
+  { name: 'Warlord',  col: '#ff00ff', r: 52, hpm: 1.6,  n: 12, k: 0.8,  charges: true,  tele: 0.8 }
+];
+const BOSS_EVERY = 6;
+const NOACID_TANK = 'thetank';
+const acidOn = () => upg[5] > 0 && eqT !== NOACID_TANK;
+const PICK = {
+  health: { col: '#6dff9c', ch: '+' },
+  rapid:  { col: '#ffe27a', ch: 'R' },
+  shield: { col: '#5cc8ff', ch: 'S' },
+  nova:   { col: '#ff9ff3', ch: 'N' }
+};
+const LEVELS = [12, 30, 55, 85];
+
+/* ---------- teams ---------- */
+const TEAMS = [
+  { id: 'red',    name: 'Red',    col: '#ff6b6b' },
+  { id: 'blue',   name: 'Blue',   col: '#5cc8ff' },
+  { id: 'green',  name: 'Green',  col: '#6dff9c' },
+  { id: 'yellow', name: 'Yellow', col: '#ffe27a' }
+];
+let team = 'blue', mode = 'survival', rivalTeam = TEAMS[0];
+try {
+  team = localStorage.getItem('holdout_team') || 'blue';
+  mode = localStorage.getItem('holdout_mode') || 'survival';
+} catch (e) {}
+if (!TEAMS.some(t => t.id === team)) team = 'blue';
+if (mode !== 'pvp') mode = 'survival';
+const teamObj  = () => TEAMS.find(t => t.id === team) || TEAMS[0];
+const teamName = () => teamObj().name;
+const teamCol  = () => teamObj().col;
+
+function cycleTeam() {
+  const i = TEAMS.findIndex(t => t.id === team);
+  team = TEAMS[(i + 1) % TEAMS.length].id;
+  try { localStorage.setItem('holdout_team', team); } catch (e) {}
+  snd(440, 0.1, 'triangle', 0.05, 200);
+}
+function toggleMode() {
+  mode = mode === 'pvp' ? 'survival' : 'pvp';
+  try { localStorage.setItem('holdout_mode', mode); } catch (e) {}
+  snd(440, 0.1, 'triangle', 0.05, 200);
+}
+
+/* ---------- state ---------- */
+let state = 'menu';
+let P, enemies, bullets, ebullets, parts, texts, pickups, rings, beams, queue;
+let score, wave, kills, combo, comboT, waveT, interT, banner, bannerT, time, shake, flash, lastLvl, overAt = 0, newBest = false;
+let matchTimer = 0;
+let best = 0;
+try { best = +localStorage.getItem('holdout_best') || 0; } catch (e) {}
+
+const keys = {};
+const aim = { x: W * 0.75, y: H / 2 };
+const input = { fire: false, press: false };
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+let aimId = null;
+let lastAimMove = 0;   // seconds (performance.now()/1000)
+let credits = 0, upg = [0, 0, 0, 0, 0, 0, 0], earned = 0;
+try {
+  credits = +localStorage.getItem('holdout_credits') || 0;
+  const u = JSON.parse(localStorage.getItem('holdout_upg'));
+  if (Array.isArray(u)) upg = [0, 1, 2, 3, 4, 5, 6].map(i => clamp(u[i] | 0, 0, 5));
+} catch (e) {}
+const UPG = [
+  { name: 'Armor',        desc: '+10 max health',              base: 100 },
+  { name: 'Boots',        desc: '+5% move speed',              base: 100 },
+  { name: 'Trigger',      desc: '+5% fire rate',               base: 150 },
+  { name: 'Dash drive',   desc: '-7% dash cooldown',           base: 120 },
+  { name: 'Flamethrower', desc: 'Rounds ignite: +1 burn dmg/s', base: 260 },
+  { name: 'Acid rounds',  desc: '+1 acid dmg/s, not on The Tank', base: 260 },
+  { name: 'Freeze ray',   desc: 'Rounds freeze: -12% enemy speed per level', base: 260 }
+];
+const MAXUPG = 5;
+const upgCost = i => UPG[i].base * (upg[i] + 1);
+const TANKS = [
+  { id: 'scout',      name: 'Scout',      desc: 'Balanced starter',        cost: 0,    hp: 0,    spd: 1,    fire: 1,    dash: 1,    r: 11, col: '#6ff2d6', dk: '#0f8f82', bl: 17, bw: 6,  sides: 0 },
+  { id: 'bulwark',    name: 'Bulwark',    desc: 'Tough and slow',          cost: 800,  hp: 50,   spd: 0.85, fire: 1,    dash: 1,    r: 13, col: '#ffa94d', dk: '#9a5a12', bl: 18, bw: 8,  sides: 4 },
+  { id: 'striker',    name: 'Striker',    desc: 'Fast fire, fragile',      cost: 1000, hp: -20,  spd: 1,    fire: 0.75, dash: 1,    r: 11, col: '#ff6b9d', dk: '#8f1f4a', bl: 22, bw: 5,  sides: 3 },
+  { id: 'phantom',    name: 'Phantom',    desc: 'Quick and slippery',      cost: 1200, hp: -10,  spd: 1.2,  fire: 1,    dash: 0.7,  r: 10, col: '#b07cff', dk: '#4b2a8f', bl: 16, bw: 5,  sides: 5 },
+  { id: 'juggernaut', name: 'Juggernaut', desc: 'Huge health, heavy',      cost: 2000, hp: 100,  spd: 0.75, fire: 0.9,  dash: 1.1,  r: 15, col: '#ffe27a', dk: '#8f7a12', bl: 20, bw: 10, sides: 6 },
+  { id: 'thetank',    name: 'The Tank',   desc: 'Juggernaut, but better',  cost: 5000, hp: 160,  spd: 0.9,  fire: 0.8,  dash: 0.85, r: 18, col: '#6dff9c', dk: '#1f7a45', bl: 26, bw: 12, sides: 8 },
+  { id: 'wraith',     name: 'Wraith',     desc: 'Dark energy forcefield',  cost: 3200, hp: -30,  spd: 1.05, fire: 1,    dash: 0.9,  r: 12, col: '#a855f7', dk: '#4c1d95', bl: 18, bw: 6,  sides: 3, force: 75 },
+  { id: 'reaper',     name: 'Reaper',     desc: 'Lifesteal on every kill', cost: 3800, hp: 20,   spd: 1.1,  fire: 0.9,  dash: 0.9,  r: 12, col: '#ff3d81', dk: '#7a0f3a', bl: 20, bw: 7,  sides: 5, lifesteal: 5 }
+];
+/* ---------- weapons ---------- */
+const WEAPONS = [
+  { id: 'blaster', name: 'Blaster',          desc: 'Standard issue auto',      stat: 'Balanced · pierces at level 5', cost: 0,    col: '#ffe27a' },
+  { id: 'minigun', name: 'Minigun',          desc: 'Extreme rate of fire',     stat: 'Very fast · inaccurate',        cost: 1500, col: '#ffa94d' },
+  { id: 'grenade', name: 'Grenade Launcher', desc: 'Lobs explosive shells',    stat: 'Area damage · slow reload',     cost: 1800, col: '#9cff57' },
+  { id: 'laser',   name: 'Laser Rifle',      desc: 'Piercing beam of light',   stat: 'Hits everything in line',       cost: 2200, col: '#7fe7ff' }
+];
+let ownedT = ['scout'], eqT = 'scout', storeTab = 0;
+let ownedW = ['blaster'], eqW = 'blaster';
+let autoFire = true;
+try {
+  const t = JSON.parse(localStorage.getItem('holdout_tanks'));
+  if (t && Array.isArray(t.owned)) {
+    ownedT = t.owned.filter(id => TANKS.some(x => x.id === id));
+    if (!ownedT.includes('scout')) ownedT.unshift('scout');
+    if (ownedT.includes(t.eq)) eqT = t.eq;
+  }
+} catch (e) {}
+try {
+  const w = JSON.parse(localStorage.getItem('holdout_weapons'));
+  if (w && Array.isArray(w.owned)) {
+    ownedW = w.owned.filter(id => WEAPONS.some(x => x.id === id));
+    if (!ownedW.includes('blaster')) ownedW.unshift('blaster');
+    if (ownedW.includes(w.eq)) eqW = w.eq;
+  }
+} catch (e) {}
+try { autoFire = localStorage.getItem('holdout_autofire') !== '0'; } catch (e) {}
+
+const curTank = () => TANKS.find(t => t.id === eqT) || TANKS[0];
+const curW    = () => WEAPONS.find(w => w.id === eqW) || WEAPONS[0];
+const maxHp = () => Math.max(40, 100 + upg[0] * 10 + curTank().hp);
+const pct = v => { const d = Math.round((v - 1) * 100); return (d > 0 ? '+' : '') + d + '%'; };
+const tankStats = t => {
+  const a = ['Health ' + (t.hp > 0 ? '+' : '') + t.hp, 'Speed ' + pct(t.spd), 'Fire rate ' + pct(1 / t.fire), 'Dash cooldown ' + pct(t.dash)];
+  if (t.force) a.push('Forcefield ' + t.force);
+  if (t.lifesteal) a.push('Lifesteal ' + t.lifesteal);
+  return a;
+};
+const tankCompact = t => {
+  let s = 'HP' + (t.hp >= 0 ? '+' : '') + t.hp + '  SPD' + pct(t.spd) + '  FIR' + pct(1 / t.fire) + '  DASH' + pct(t.dash);
+  if (t.force) s += '  FF' + t.force;
+  if (t.lifesteal) s += '  LS' + t.lifesteal;
+  return s;
+};
+
+function buyTank(i) {
+  const t = TANKS[i];
+  if (!t || ownedT.includes(t.id) || credits < t.cost) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  credits -= t.cost; ownedT.push(t.id); eqT = t.id; saveStore();
+  snd(500, 0.25, 'triangle', 0.07, 500);
+}
+function equipTank(i) {
+  const t = TANKS[i];
+  if (!t || !ownedT.includes(t.id)) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  eqT = t.id; saveStore(); snd(400, 0.15, 'triangle', 0.06, 300);
+}
+function buyWeapon(i) {
+  const w = WEAPONS[i];
+  if (!w) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  if (ownedW.includes(w.id)) { equipWeapon(i); return; }
+  if (credits < w.cost) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  credits -= w.cost; ownedW.push(w.id); eqW = w.id; saveStore();
+  snd(500, 0.25, 'triangle', 0.07, 500);
+}
+function equipWeapon(i) {
+  const w = WEAPONS[i];
+  if (!w || !ownedW.includes(w.id)) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  eqW = w.id; saveStore(); snd(400, 0.15, 'triangle', 0.06, 300);
+}
+function toggleAutoFire() {
+  autoFire = !autoFire;
+  try { localStorage.setItem('holdout_autofire', autoFire ? '1' : '0'); } catch (e) {}
+  snd(autoFire ? 620 : 300, 0.12, 'triangle', 0.05, autoFire ? 220 : -120);
+}
+const GSTEP = 118, GCW = 110, GX0 = 8;
+function garageClick(p) {
+  if (p.x > 20 && p.x < 130 && p.y < 64) { state = 'menu'; return; }
+  const i = Math.floor((p.x - GX0) / GSTEP);
+  if (i >= 0 && i < TANKS.length && (p.x - GX0) % GSTEP < GCW && p.y > 150 && p.y < 510) equipTank(i);
+}
+function saveStore() {
+  try {
+    localStorage.setItem('holdout_credits', String(credits));
+    localStorage.setItem('holdout_upg', JSON.stringify(upg));
+    localStorage.setItem('holdout_tanks', JSON.stringify({ owned: ownedT, eq: eqT }));
+    localStorage.setItem('holdout_weapons', JSON.stringify({ owned: ownedW, eq: eqW }));
+  } catch (e) {}
+}
+function buy(i) {
+  if (i < 0 || i >= UPG.length || upg[i] >= MAXUPG || credits < upgCost(i)) { snd(150, 0.12, 'square', 0.05, -60); return; }
+  credits -= upgCost(i); upg[i]++; saveStore();
+  snd(500, 0.2, 'triangle', 0.07, 400);
+}
+function storeClick(p) {
+  if (p.x > 20 && p.x < 130 && p.y < 64) { state = 'menu'; return; }
+  if (p.y < 64) {
+    if (p.x > 280 && p.x < 390) { storeTab = 0; return; }
+    if (p.x > 395 && p.x < 505) { storeTab = 1; return; }
+    if (p.x > 510 && p.x < 620) { storeTab = 2; return; }
+  }
+  if (storeTab === 0) {
+    for (let i = 0; i < UPG.length; i++) if (p.x > 230 && p.x < 730 && p.y > 150 + i * 60 && p.y < 202 + i * 60) buy(i);
+  } else if (storeTab === 1) {
+    for (let i = 0; i < TANKS.length; i++) if (p.x > 200 && p.x < 760 && p.y > 130 + i * 60 && p.y < 184 + i * 60) buyTank(i);
+  } else {
+    for (let i = 0; i < WEAPONS.length; i++) if (p.x > 200 && p.x < 760 && p.y > 150 + i * 82 && p.y < 226 + i * 82) buyWeapon(i);
+  }
+}
+
+function updateCam() {
+  cam.x = clamp(P.x - W / 2, 0, WW - W);
+  cam.y = clamp(P.y - H / 2, 0, WH - H);
+}
+
+function reset() {
+  const t = curTank();
+  P = { x: WW / 2, y: WH / 2, vx: 0, vy: 0, hp: maxHp(), max: maxHp(), r: t.r, ang: 0, fireCd: 0,
+        dashT: 0, dashCd: 0, dx: 1, dy: 0, inv: 0, shield: 0, rapid: 0,
+        force: t.force || 0, forceMax: t.force || 0, forceRegenT: 0 };
+  enemies = []; bullets = []; ebullets = []; parts = []; texts = []; pickups = []; rings = []; beams = []; queue = [];
+  score = 0; wave = 0; kills = 0; combo = 0; comboT = 0; waveT = 0; interT = -1;
+  banner = ''; bannerT = 0; time = 0; shake = 0; flash = 0; lastLvl = 1; newBest = false;
+  matchTimer = 120;
+  ghosts = [];
+  aim.x = P.x + 200; aim.y = P.y;
+  lastAimMove = 0;
+  updateCam();
+  nextWave();
+}
+
+function start() {
+  Board.refresh();
+  initAudio();
+  const ti = TEAMS.findIndex(t => t.id === team);
+  rivalTeam = TEAMS[(ti + 2) % TEAMS.length];
+  reset();
+  state = 'play';
+}
+
+function weaponLevel() {
+  let l = 1;
+  for (const t of LEVELS) if (kills >= t) l++;
+  return l;
+}
+
+/* ---------- waves ---------- */
+function pickType() {
+  const w = {
+    grunt: 10,
+    runner: wave >= 2 ? 4 + wave * 0.5 : 0,
+    spitter: wave >= 3 ? 2 + wave * 0.4 : 0,
+    tank: wave >= 3 ? 1.5 + wave * 0.4 : 0
+  };
+  let tot = 0;
+  for (const k in w) tot += w[k];
+  let r = Math.random() * tot;
+  for (const k in w) { r -= w[k]; if (r <= 0) return k; }
+  return 'grunt';
+}
+
+function nextWave() {
+  wave++;
+  waveT = 0;
+  queue = [];
+
+  if (mode === 'pvp') {
+    banner = 'Wave ' + wave;
+    bannerT = 2.2;
+    return;
+  }
+
+  const isBoss = wave % BOSS_EVERY === 0;
+  const bi0 = (Math.floor(wave / BOSS_EVERY) - 1) % BOSSES.length;
+  banner = isBoss ? 'Wave ' + wave + ': ' + BOSSES[bi0].name : 'Wave ' + wave;
+  bannerT = 2.2;
+
+  if (isBoss) {
+    const bossCount = Math.max(1, Math.floor(wave / 18));
+    for (let b = 0; b < bossCount; b++) {
+      queue.push({ type: 'boss', bi: (bi0 + b) % BOSSES.length, at: b * 1.5 });
+    }
+    const n = Math.floor(wave * 1.8);
+    for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.7 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
+  } else {
+    const n = Math.min(70, Math.floor(7 + wave * 3.2));
+    const gap = Math.max(0.22, 0.6 - wave * 0.02);
+    for (let i = 0; i < n; i++) queue.push({ type: pickType(), at: i * gap });
+  }
+}
+
+/* spawn just outside the visible viewport so the bigger map stays fair */
+function spawnPos() {
+  const m = 60;
+  for (let t = 0; t < 24; t++) {
+    const s = Math.floor(Math.random() * 4);
+    let x, y;
+    if (s === 0) { x = cam.x + rnd(-m, W + m); y = cam.y - m; }
+    else if (s === 1) { x = cam.x + rnd(-m, W + m); y = cam.y + H + m; }
+    else if (s === 2) { x = cam.x - m; y = cam.y + rnd(-m, H + m); }
+    else { x = cam.x + W + m; y = cam.y + rnd(-m, H + m); }
+    x = clamp(x, 26, WW - 26); y = clamp(y, 26, WH - 26);
+    if (Math.hypot(x - P.x, y - P.y) > 260) return { x, y };
+  }
+  return { x: clamp(P.x + rnd(-500, 500), 26, WW - 26), y: clamp(P.y + rnd(-500, 500), 26, WH - 26) };
+}
+
+function spawnEnemy(type, bi) {
+  const d = DEF[type];
+  const B = type === 'boss' ? BOSSES[bi || 0] : null;
+  const sp = spawnPos();
+  const x = sp.x, y = sp.y;
+  const col = B ? B.col : d.col;
+  /* --- stronger opponents: bigger hp / damage / speed scaling --- */
+  const hp = B ? Math.ceil((140 + wave * 28) * B.hpm)
+           : Math.ceil(d.hp * 1.7 * (1 + wave * 0.12));
+  enemies.push({
+    type, col, boss: !!B, bi: bi || 0, bname: B ? B.name : '', bt: 0, bt2: 0,
+    x, y, r: B ? B.r : d.r, hp, max: hp,
+    sp: B ? d.sp : d.sp * Math.min(1.5, 1 + wave * 0.022),
+    dmg: Math.round(d.dmg * 1.55),
+    spawn: B ? 1.2 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
+    ringCd: 2, aimCd: 1, chargeCd: B && B.charges ? (B.name === 'Charger' ? 2.5 : 5) : 99999, tele: 0, charge: 0, cx: 0, cy: 0, rot: 0, t: 0, dead: false,
+    burn: 0, burnDps: 0, acid: 0, acidDps: 0, freeze: 0, fz: 0
+  });
+}
+
+/* ---------- effects ---------- */
+function burst(x, y, col, n, spd, life = 0.5, size = 3) {
+  if (parts.length > 900) return;
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, TAU), s = rnd(spd * 0.3, spd);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, t: rnd(life * 0.6, life), max: life, col, size: rnd(size * 0.5, size) });
+  }
+}
+function floatText(x, y, txt, col, size = 15) {
+  texts.push({ x, y, t: 0.9, txt, col, size });
+}
+function eb(x, y, vx, vy) {
+  ebullets.push({ x, y, vx, vy, life: 6, dead: false });
+}
+
+/* ---------- combat ---------- */
+function makeBullet(x, y, ang, sp, o) {
+  return Object.assign({
+    x, y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+    life: 1.1, pierce: 0, hits: [], r: 3, dead: false,
+    burn: 0, acid: 0, freeze: 0, dmg: 1, grenade: false, col: null
+  }, o || {});
+}
+function applyRounds(e, b) {
+  if (b.burn) { e.burn = Math.max(e.burn, 2.5); e.burnDps = Math.max(e.burnDps, b.burn); }
+  if (b.acid) { e.acid = Math.max(e.acid, 4); e.acidDps = Math.max(e.acidDps, b.acid); }
+  if (b.freeze) { e.freeze = Math.max(e.freeze, 2.5); e.fz = Math.max(e.fz, 0.12 * b.freeze); }
+}
+
+function fire() {
+  const w = curW(), lvl = weaponLevel();
+  const burn = upg[4], acid = acidOn() ? upg[5] : 0, freeze = upg[6];
+  const rate = (1 - upg[2] * 0.05) * curTank().fire;
+  const rapid = P.rapid > 0 ? 0.6 : 1;
+  const a0 = P.ang;
+
+  if (w.id === 'laser') {
+    fireLaser(lvl, burn, acid, freeze);
+    P.fireCd = 0.16 * rate * rapid;
+    P.vx -= Math.cos(a0) * 8; P.vy -= Math.sin(a0) * 8;
+  } else if (w.id === 'grenade') {
+    fireGrenade(lvl, burn, acid, freeze);
+    P.fireCd = 0.85 * rate * (P.rapid > 0 ? 0.8 : 1);
+    P.vx -= Math.cos(a0) * 50; P.vy -= Math.sin(a0) * 50;
+  } else if (w.id === 'minigun') {
+    fireMinigun(lvl, burn, acid, freeze);
+    P.fireCd = 0.062 * rate * rapid;
+    P.vx -= Math.cos(a0) * 4; P.vy -= Math.sin(a0) * 4;
+  } else {
+    const sp = 620;
+    const add = (off, lat) => {
+      const aa = a0 + off;
+      bullets.push(makeBullet(
+        P.x + Math.cos(a0) * 16 - Math.sin(a0) * lat,
+        P.y + Math.sin(a0) * 16 + Math.cos(a0) * lat,
+        aa, sp,
+        { life: 1.1, pierce: lvl >= 5 ? 2 : 0, r: 3, burn, acid, freeze, dmg: 1 }
+      ));
+    };
+    if (lvl === 1) add(0, 0);
+    else if (lvl === 2) { add(0, -6); add(0, 6); }
+    else if (lvl === 3) { add(-0.14, 0); add(0, 0); add(0.14, 0); }
+    else { for (const o of [-0.28, -0.14, 0, 0.14, 0.28]) add(o, 0); }
+    P.fireCd = (0.2 - (lvl - 1) * 0.012) * rate * rapid;
+    P.vx -= Math.cos(a0) * 10; P.vy -= Math.sin(a0) * 10;
+    burst(P.x + Math.cos(a0) * 18, P.y + Math.sin(a0) * 18, burn ? '#ff9f43' : '#ffe27a', 2, 120, 0.15, 2.5);
+    snd(520 + rnd(-30, 30), 0.06, 'square', 0.025, -220);
+  }
+}
+
+function fireMinigun(lvl, burn, acid, freeze) {
+  const a = P.ang + rnd(-0.14, 0.14);
+  bullets.push(makeBullet(
+    P.x + Math.cos(a) * 18, P.y + Math.sin(a) * 18, a, 800,
+    { life: 0.8, r: 2.5, burn, acid, freeze, dmg: 1, col: '#ffa94d' }
+  ));
+  burst(P.x + Math.cos(a) * 20, P.y + Math.sin(a) * 20, '#ffa94d', 1, 90, 0.12, 2);
+  snd(400 + rnd(-80, 80), 0.035, 'square', 0.02, -160);
+}
+
+function fireGrenade(lvl, burn, acid, freeze) {
+  const a = P.ang;
+  bullets.push(makeBullet(
+    P.x + Math.cos(a) * 20, P.y + Math.sin(a) * 20, a, 460,
+    { life: 0.9, r: 6, grenade: true, burn, acid, freeze, dmg: 0, col: '#9cff57' }
+  ));
+  burst(P.x + Math.cos(a) * 22, P.y + Math.sin(a) * 22, '#9cff57', 3, 130, 0.2, 3);
+  snd(180, 0.12, 'square', 0.05, 120);
+}
+
+function fireLaser(lvl, burn, acid, freeze) {
+  const a = P.ang;
+  const maxD = 1100;
+  const x2 = P.x + Math.cos(a) * maxD, y2 = P.y + Math.sin(a) * maxD;
+  const dx = x2 - P.x, dy = y2 - P.y;
+  const len2 = dx * dx + dy * dy;
+  const dmg = 2 + Math.floor((lvl - 1) / 2);
+  beams.push({ x1: P.x, y1: P.y, x2, y2, t: 0, dur: 0.11, col: '#7fe7ff' });
+  for (const e of enemies) {
+    if (e.dead || e.spawn > 0) continue;
+    const tt = clamp(((e.x - P.x) * dx + (e.y - P.y) * dy) / len2, 0, 1);
+    const px = P.x + dx * tt, py = P.y + dy * tt;
+    if (Math.hypot(e.x - px, e.y - py) < e.r + 9) {
+      hitEnemy(e, dmg);
+      if (!e.dead) applyRounds(e, { burn, acid, freeze });
+      burst(px, py, '#7fe7ff', 4, 150, 0.25, 2.5);
+    }
+  }
+  burst(P.x + Math.cos(a) * 20, P.y + Math.sin(a) * 20, '#7fe7ff', 3, 150, 0.15, 2.5);
+  snd(900, 0.09, 'sawtooth', 0.03, -400);
+}
+
+function explode(x, y, b) {
+  const R = 100;
+  rings.push({ x, y, r: 10, max: R, t: 0, dur: 0.35, col: '#9cff57' });
+  burst(x, y, '#9cff57', 26, 320, 0.5, 4);
+  burst(x, y, '#ffffff', 8, 200, 0.3, 3);
+  shake = Math.max(shake, 7);
+  snd(90, 0.3, 'sawtooth', 0.07, -50);
+  for (const e of enemies) {
+    if (e.dead || e.spawn > 0) continue;
+    if (Math.hypot(e.x - x, e.y - y) < R + e.r) {
+      hitEnemy(e, 6);
+      if (!e.dead && b) applyRounds(e, b);
+    }
+  }
+}
+
+function dash() {
+  if (state !== 'play' || P.dashCd > 0) return;
+  let mx = moveX(), my = moveY();
+  const l = Math.hypot(mx, my);
+  if (l > 0.1) { P.dx = mx / l; P.dy = my / l; }
+  else { P.dx = Math.cos(P.ang); P.dy = Math.sin(P.ang); }
+  P.dashT = 0.16; P.dashCd = 1.1 * (1 - upg[3] * 0.07) * curTank().dash; P.inv = Math.max(P.inv, 0.26);
+  rings.push({ x: P.x, y: P.y, r: 8, max: 40, t: 0, dur: 0.25, col: '#6ff2d6' });
+  snd(300, 0.16, 'sawtooth', 0.05, 500);
+}
+
+function hitEnemy(e, dmg) {
+  if (e.dead) return;
+  e.hp -= dmg; e.flash = 0.08;
+  if (e.hp <= 0) killEnemy(e);
+}
+
+function killEnemy(e) {
+  e.dead = true;
+  const d = DEF[e.type];
+  const col = e.col || d.col;
+  combo++; comboT = 2.5;
+  const mult = 1 + Math.min(4, Math.floor(combo / 5));
+  const pts = d.score * mult;
+  score += pts; kills++;
+  burst(e.x, e.y, col, e.boss ? 80 : 14, e.boss ? 380 : 220, 0.6, e.boss ? 6 : 3.5);
+  rings.push({ x: e.x, y: e.y, r: e.r, max: e.r + (e.boss ? 160 : 34), t: 0, dur: e.boss ? 0.7 : 0.3, col });
+  floatText(e.x, e.y - e.r, '+' + pts, '#ffe27a', e.boss ? 26 : 15);
+  shake = Math.max(shake, e.boss ? 16 : e.type === 'tank' ? 6 : 3);
+  snd(e.boss ? 90 : 170, e.boss ? 0.6 : 0.12, 'sawtooth', 0.07, -80);
+  if (e.boss) {
+    ebullets = [];
+    pickups.push({ x: e.x - 24, y: e.y, type: 'health', life: 14, dead: false });
+    pickups.push({ x: e.x + 24, y: e.y, type: 'nova', life: 14, dead: false });
+    if (e.bi >= 4) {
+      pickups.push({ x: e.x, y: e.y - 24, type: 'rapid', life: 14, dead: false });
+      pickups.push({ x: e.x, y: e.y + 24, type: 'shield', life: 14, dead: false });
+    }
+  } else if (Math.random() < 0.11) {
+    const r = Math.random();
+    const type = r < 0.4 ? 'health' : r < 0.65 ? 'rapid' : r < 0.85 ? 'shield' : 'nova';
+    pickups.push({ x: e.x, y: e.y, type, life: 10, dead: false });
+  }
+  /* Reaper lifesteal */
+  const ls = curTank().lifesteal;
+  if (ls && P.hp > 0) {
+    P.hp = Math.min(P.max, P.hp + ls);
+    floatText(P.x, P.y - 34, '+' + ls, '#ff6b9d', 13);
+  }
+  const l = weaponLevel();
+  if (l > lastLvl) {
+    lastLvl = l;
+    floatText(P.x, P.y - 30, 'Weapon level ' + l, '#ffe27a', 22);
+    snd(400, 0.3, 'triangle', 0.08, 500);
+  }
+}
+
+function hurt(n, sx, sy) {
+  if (P.inv > 0 || P.dashT > 0 || P.hp <= 0) return;
+  if (P.shield > 0) {
+    P.inv = 0.3;
+    rings.push({ x: P.x, y: P.y, r: 14, max: 34, t: 0, dur: 0.25, col: '#5cc8ff' });
+    snd(300, 0.1, 'sine', 0.05);
+    return;
+  }
+  /* dark energy forcefield absorbs damage first */
+  if (P.force > 0) {
+    const absorbed = Math.min(P.force, n);
+    P.force -= absorbed;
+    n -= absorbed;
+    P.forceRegenT = 3.5;
+    P.inv = 0.35;
+    rings.push({ x: P.x, y: P.y, r: 16, max: 46, t: 0, dur: 0.3, col: '#a855f7' });
+    burst(P.x, P.y, '#a855f7', 9, 200, 0.3, 3);
+    snd(220, 0.14, 'sine', 0.055, -90);
+    shake = Math.max(shake, 4);
+    if (n <= 0) return;
+  }
+  P.hp -= n; P.inv = 0.7; flash = 0.6; shake = Math.max(shake, 9); combo = 0;
+  const dx = P.x - sx, dy = P.y - sy, d = Math.hypot(dx, dy) || 1;
+  P.vx += dx / d * 260; P.vy += dy / d * 260;
+  burst(P.x, P.y, '#6ff2d6', 10, 200);
+  snd(120, 0.25, 'sawtooth', 0.08, -60);
+  if (P.hp <= 0) die();
+}
+
+function die() {
+  P.hp = 0;
+  state = 'over';
+  overAt = performance.now();
+  burst(P.x, P.y, '#6ff2d6', 60, 340, 0.9, 5);
+  snd(110, 0.8, 'sawtooth', 0.1, -80);
+  if (score > best) {
+    best = score; newBest = true;
+    try { localStorage.setItem('holdout_best', String(best)); } catch (e) {}
+  }
+  earned = Math.floor(score / 20) + wave * 5; credits += earned; saveStore();
+  Board.onGameOver(score, wave, kills);
+  if (lobbyCode) pushLobbyStateNow();
+}
+
+function nova() {
+  rings.push({ x: P.x, y: P.y, r: 10, max: 300, t: 0, dur: 0.45, col: '#ff9ff3' });
+  for (const e of enemies) {
+    if (e.spawn > 0 || e.dead) continue;
+    if (Math.hypot(e.x - P.x, e.y - P.y) < 300) hitEnemy(e, e.boss ? 8 : 6);
+  }
+  for (const b of ebullets) burst(b.x, b.y, '#ff9ff3', 3, 100, 0.3, 2);
+  ebullets = [];
+  shake = Math.max(shake, 10);
+  snd(200, 0.5, 'sine', 0.1, 600);
+}
+
+/* ---------- boss ---------- */
+function bossRing(e, n, sp, rot) {
+  for (let i = 0; i < n; i++) {
+    const a = rot + i / n * TAU;
+    eb(e.x, e.y, Math.cos(a) * sp, Math.sin(a) * sp);
+  }
+}
+function bossAimed(e, base, offs, sp) {
+  for (const o of offs) eb(e.x, e.y, Math.cos(base + o) * sp, Math.sin(base + o) * sp);
+}
+function bossSummon(e, type, n) {
+  for (let i = 0; i < n; i++) {
+    if (enemies.length > 34) return;
+    spawnEnemy(type);
+    const m = enemies[enemies.length - 1];
+    m.x = clamp(e.x + rnd(-60, 60), 20, WW - 20); m.y = clamp(e.y + rnd(-60, 60), 20, WH - 20);
+  }
+}
+function bossAI(e, dt, nx, ny) {
+  const rage = e.hp < e.max * 0.5;
+  const B = BOSSES[e.bi];
+  const d = Math.hypot(P.x - e.x, P.y - e.y);
+  const base = Math.atan2(ny, nx);
+  e.t += dt;
+  if (e.tele > 0) {
+    e.tele -= dt;
+    e.cx = nx; e.cy = ny;
+    if (e.tele <= 0) { e.charge = B.name === 'Charger' ? 0.55 : 0.7; snd(80, 0.5, 'sawtooth', 0.09, 200); }
+  } else if (e.charge > 0) {
+    e.charge -= dt;
+    e.x += e.cx * (B.name === 'Charger' ? 560 : 430) * dt; e.y += e.cy * (B.name === 'Charger' ? 560 : 430) * dt;
+    burst(e.x, e.y, e.col, 1, 60, 0.3, 6);
+    if (e.charge <= 0 && B.name === 'Charger') bossRing(e, rage ? 14 : 10, 190, e.rot += 0.2);
+  } else {
+    switch (B.name) {
+      case 'Brute': {
+        const sp = rage ? 62 : 45;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 1.6 : 2.3; e.rot += 0.3; bossRing(e, rage ? 18 : 12, 170, e.rot); snd(140, 0.3, 'square', 0.06, -60); }
+        if (rage) { e.aimCd -= dt; if (e.aimCd <= 0) { e.aimCd = 1.1; bossAimed(e, base, [-0.25, 0, 0.25], 260); } }
+        break;
+      }
+      case 'Sniper': {
+        const m = d < 280 ? -1 : d > 380 ? 1 : 0;
+        const sp = rage ? 85 : 65;
+        e.x += nx * m * sp * dt - ny * 25 * dt; e.y += ny * m * sp * dt + nx * 25 * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) {
+          e.aimCd = rage ? 0.8 : 1.3;
+          bossAimed(e, base, rage ? [-0.08, 0.08] : [0], 400);
+          snd(700, 0.1, 'square', 0.05, -400);
+        }
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = 4; bossRing(e, 8, 150, e.rot += 0.4); }
+        break;
+      }
+      case 'Summoner': {
+        e.x += nx * 35 * dt; e.y += ny * 35 * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) { e.aimCd = rage ? 3 : 4.5; bossSummon(e, rage ? 'runner' : 'grunt', rage ? 4 : 3); snd(200, 0.3, 'triangle', 0.06, 300); }
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 2 : 3; bossRing(e, 10, 140, e.rot += 0.5); }
+        break;
+      }
+      case 'Spiral': {
+        e.x += nx * 30 * dt; e.y += ny * 30 * dt;
+        e.rot += dt * (rage ? 3.2 : 2.2);
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) {
+          e.ringCd = rage ? 0.07 : 0.1;
+          eb(e.x, e.y, Math.cos(e.rot) * 165, Math.sin(e.rot) * 165);
+          eb(e.x, e.y, Math.cos(e.rot + Math.PI) * 165, Math.sin(e.rot + Math.PI) * 165);
+          if (rage) { eb(e.x, e.y, Math.cos(e.rot + Math.PI / 2) * 165, Math.sin(e.rot + Math.PI / 2) * 165); }
+        }
+        break;
+      }
+      case 'Charger': {
+        const sp = rage ? 100 : 80;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        break;
+      }
+      case 'Shotgun': {
+        const sp = rage ? 62 : 50;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) {
+          e.aimCd = rage ? 1.2 : 1.8;
+          const offs = [];
+          const n = rage ? 9 : 7;
+          for (let i = 0; i < n; i++) offs.push((i / (n - 1) - 0.5) * 1.0);
+          bossAimed(e, base, offs, 240);
+          snd(110, 0.25, 'square', 0.07, -50);
+        }
+        break;
+      }
+      case 'Blinker': {
+        e.x += nx * 25 * dt; e.y += ny * 25 * dt;
+        e.bt -= dt;
+        if (e.bt <= 0) {
+          e.bt = rage ? 1.8 : 2.6;
+          rings.push({ x: e.x, y: e.y, r: e.r, max: e.r + 60, t: 0, dur: 0.3, col: e.col });
+          const a = rnd(0, TAU), dist = rnd(150, 260);
+          e.x = clamp(P.x + Math.cos(a) * dist, e.r, WW - e.r);
+          e.y = clamp(P.y + Math.sin(a) * dist, e.r, WH - e.r);
+          rings.push({ x: e.x, y: e.y, r: e.r + 60, max: e.r, t: 0, dur: 0.3, col: e.col });
+          bossRing(e, rage ? 16 : 12, 190, rnd(0, TAU));
+          bossAimed(e, Math.atan2(P.y - e.y, P.x - e.x), [0], 300);
+          snd(900, 0.15, 'sine', 0.06, -600);
+        }
+        break;
+      }
+      case 'Warlord': {
+        const sp = rage ? 55 : 42;
+        e.x += nx * sp * dt; e.y += ny * sp * dt;
+        e.ringCd -= dt;
+        if (e.ringCd <= 0) { e.ringCd = rage ? 1.8 : 2.5; e.rot += 0.25; bossRing(e, rage ? 20 : 14, 170, e.rot); snd(140, 0.3, 'square', 0.06, -60); }
+        e.aimCd -= dt;
+        if (e.aimCd <= 0) { e.aimCd = rage ? 1.0 : 1.6; bossAimed(e, base, rage ? [-0.3, -0.15, 0, 0.15, 0.3] : [-0.2, 0, 0.2], 270); }
+        e.bt2 -= dt;
+        if (e.bt2 <= 0) { e.bt2 = rage ? 4.5 : 6.5; bossSummon(e, 'grunt', rage ? 4 : 2); }
+        break;
+      }
+    }
+    e.chargeCd -= dt;
+    if (e.chargeCd <= 0 && B.charges) { e.chargeCd = B.name === 'Charger' ? (rage ? 1.6 : 2.4) : (rage ? 4 : 6); e.tele = B.tele; }
+  }
+  e.x = clamp(e.x, e.r, WW - e.r);
+  e.y = clamp(e.y, e.r, WH - e.r);
+}
+
+/* ---------- input ---------- */
+function moveX() {
+  let x = 0;
+  if (keys['a'] || keys['arrowleft']) x--;
+  if (keys['d'] || keys['arrowright']) x++;
+  return x + joy.x;
+}
+function moveY() {
+  let y = 0;
+  if (keys['w'] || keys['arrowup']) y--;
+  if (keys['s'] || keys['arrowdown']) y++;
+  return y + joy.y;
+}
+
+function togglePause() {
+  if (state === 'play') state = 'pause';
+  else if (state === 'pause') { state = 'play'; last = performance.now(); }
+}
+
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+  if (!keys[k]) {
+    initAudio();
+    if (k === ' ' || k === 'shift') dash();
+    if (k === 'p' || k === 'escape') togglePause();
+    if (k === 'm') muted = !muted;
+    if (k === 'h') toggleAutoFire();
+    if (k === 'f' && !autoFire && state === 'play') input.press = true;
+
+    if (state === 'menu' || (state === 'over' && performance.now() - overAt > 600)) {
+      if (k === 's') state = 'store';
+      else if (k === 'l') state = 'board';
+      else if (k === 'g') state = 'garage';
+      else if (k === 't') cycleTeam();
+      else if (k === 'v') toggleMode();
+      else if (k === 'c') createLobby();
+      else if (k === 'j') joinLobbyPrompt();
+    } else if (state === 'store') {
+      if (k === 't') storeTab = (storeTab + 1) % 3;
+      else if (k >= '1' && k <= '8') {
+        const i = +k - 1;
+        if (storeTab === 1) { if (i < TANKS.length) buyTank(i); }
+        else if (storeTab === 2) { if (WEAPONS[i]) { if (ownedW.includes(WEAPONS[i].id)) equipWeapon(i); else buyWeapon(i); } }
+        else if (i < UPG.length) buy(i);
+      }
+      else if (k === 'b' || k === 'escape') state = 'menu';
+    } else if (state === 'board') {
+      if (k === 'b' || k === 'escape' || k === 'l') state = 'menu';
+    } else if (state === 'garage') {
+      if (k >= '1' && k <= '8') equipTank(+k - 1);
+      else if (k === 'b' || k === 'escape' || k === 'g') state = 'menu';
+    } else if (state === 'lobby') {
+      if (k === 'escape' || k === 'b') leaveLobby();
+      else if (k === 't') { cycleTeam(); Lobby.setTeam(team).then(lob => applyLobby(lob)); }
+      else if (k === 'r') { pollLobby(); lobbyMsg = 'Refreshing...'; lobbyMsgT = 1; }
+      else if (k === 'enter') {
+        if (lobbyIsHost) Lobby.start().then(() => pollLobby());
+        else lobbyMsg = 'Only the host can start', lobbyMsgT = 2;
+      }
+    }
+
+    if ((k === 'enter' || k === ' ') && state === 'menu') start();
+    if ((k === 'enter' || k === 'r') && state === 'over' && performance.now() - overAt > 600) {
+      if (lobbyCode) { state = 'lobby'; pollLobby(); } else start();
+    }
+    if (k === 'r' && state === 'pause') start();
+  }
+  keys[k] = true;
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false;
+  input.fire = false;
+  if (state === 'play') state = 'pause';
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play') state = 'pause'; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+}
+cv.addEventListener('pointerdown', e => {
+  initAudio();
+  const sp = pos(e);
+  if (state === 'store') { storeClick(sp); return; }
+  if (state === 'board') { state = 'menu'; return; }
+  if (state === 'garage') { garageClick(sp); return; }
+  if (state === 'lobby') { lobbyClick(sp); return; }
+  if ((state === 'menu' || state === 'over') && sp.y < 64) {
+    if (sp.x > 20 && sp.x < 130) { state = 'store'; return; }
+    if (sp.x > 140 && sp.x < 250) { state = 'board'; return; }
+    if (sp.x > 260 && sp.x < 370) { state = 'garage'; return; }
+    if (sp.x > 380 && sp.x < 490) { cycleTeam(); return; }
+    if (sp.x > 500 && sp.x < 610) { toggleMode(); return; }
+    if (sp.x > 620 && sp.x < 730) { openLobbyScreen(); return; }
+  }
+  if (state === 'menu') { start(); return; }
+  if (state === 'over') { if (performance.now() - overAt > 600) start(); return; }
+  if (state === 'pause') { togglePause(); return; }
+  /* HUD: auto-fire toggle button */
+  if (state === 'play' && sp.x > 20 && sp.x < 210 && sp.y > H - 58 && sp.y < H - 18) { toggleAutoFire(); return; }
+  const p = { x: sp.x + cam.x, y: sp.y + cam.y };
+  if (e.pointerType === 'mouse') { aim.x = p.x; aim.y = p.y; input.fire = true; input.press = true; lastAimMove = performance.now() / 1000; }
+  else if (sp.x < W / 2 && joy.id === null) { joy.id = e.pointerId; joy.ox = sp.x; joy.oy = sp.y; joy.x = joy.y = 0; }
+  else if (aimId === null) { aimId = e.pointerId; aim.x = p.x; aim.y = p.y; input.fire = true; input.press = true; lastAimMove = performance.now() / 1000; }
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+});
+cv.addEventListener('pointermove', e => {
+  const sp = pos(e);
+  if (e.pointerType === 'mouse') { aim.x = sp.x + cam.x; aim.y = sp.y + cam.y; lastAimMove = performance.now() / 1000; }
+  else if (e.pointerId === joy.id) {
+    let dx = (sp.x - joy.ox) / 60, dy = (sp.y - joy.oy) / 60;
+    const l = Math.hypot(dx, dy);
+    if (l > 1) { dx /= l; dy /= l; }
+    joy.x = dx; joy.y = dy;
+  } else if (e.pointerId === aimId) { aim.x = sp.x + cam.x; aim.y = sp.y + cam.y; lastAimMove = performance.now() / 1000; }
+});
+function release(e) {
+  if (e.pointerType === 'mouse') input.fire = false;
+  if (e.pointerId === joy.id) { joy.id = null; joy.x = joy.y = 0; }
+  if (e.pointerId === aimId) { aimId = null; input.fire = false; }
+}
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+document.getElementById('dash').addEventListener('pointerdown', e => { e.stopPropagation(); initAudio(); dash(); });
+
+/* ---------- update ---------- */
+function updateFx(dt) {
+  for (const p of parts) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    const f = Math.max(0, 1 - dt * 4);
+    p.vx *= f; p.vy *= f; p.t -= dt;
+  }
+  parts = parts.filter(p => p.t > 0);
+  for (const r of rings) r.t += dt;
+  rings = rings.filter(r => r.t < r.dur);
+  for (const b of beams) b.t += dt;
+  beams = beams.filter(b => b.t < b.dur);
+  for (const t of texts) { t.t -= dt; t.y -= 26 * dt; }
+  texts = texts.filter(t => t.t > 0);
+  shake = Math.max(0, shake - dt * 30);
+  flash = Math.max(0, flash - dt * 1.6);
+  if (bannerT > 0) bannerT -= dt;
+  if (lobbyMsgT > 0) lobbyMsgT -= dt;
+}
+
+function update(dt) {
+  time += dt;
+  P.fireCd -= dt; P.inv -= dt; P.dashCd -= dt; P.shield -= dt; P.rapid -= dt;
+  if (comboT > 0) { comboT -= dt; if (comboT <= 0) combo = 0; }
+
+  /* dark energy forcefield regen */
+  if (P.forceMax > 0 && P.force < P.forceMax) {
+    P.forceRegenT -= dt;
+    if (P.forceRegenT <= 0) P.force = Math.min(P.forceMax, P.force + 20 * dt);
+  }
+
+  /* auto-aim: when auto-fire is on and the player hasn't aimed recently, target nearest enemy */
+  if (autoFire && performance.now() / 1000 - lastAimMove > 0.8) {
+    let nearest = null, nd = Infinity;
+    for (const e of enemies) {
+      if (e.dead || e.spawn > 0) continue;
+      const d = Math.hypot(e.x - P.x, e.y - P.y);
+      if (d < nd) { nd = d; nearest = e; }
+    }
+    if (nearest) { aim.x = nearest.x; aim.y = nearest.y; }
+  }
+
+  /* player */
+  P.ang = Math.atan2(aim.y - P.y, aim.x - P.x);
+  let mx = moveX(), my = moveY();
+  const ml = Math.hypot(mx, my);
+  if (ml > 1) { mx /= ml; my /= ml; }
+  if (P.dashT > 0) {
+    P.dashT -= dt;
+    P.vx = P.dx * 640; P.vy = P.dy * 640;
+    parts.push({ x: P.x, y: P.y, vx: 0, vy: 0, t: 0.25, max: 0.25, col: '#6ff2d6', size: 9 });
+  } else {
+    const k = Math.min(1, dt * 11);
+    P.vx += (mx * 235 * (1 + upg[1] * 0.05) * curTank().spd - P.vx) * k;
+    P.vy += (my * 235 * (1 + upg[1] * 0.05) * curTank().spd - P.vy) * k;
+  }
+  P.x = clamp(P.x + P.vx * dt, 16, WW - 16);
+  P.y = clamp(P.y + P.vy * dt, 16, WH - 16);
+  updateCam();
+
+  /* firing — when auto-fire is ON it is a true switch: always fires. */
+  const wantFire = autoFire ? true : input.press;
+  if (wantFire && P.fireCd <= 0) {
+    fire();
+    if (!autoFire) input.press = false;
+  }
+
+  /* PvP match timer */
+  if (mode === 'pvp' && state === 'play') {
+    matchTimer -= dt;
+    if (matchTimer <= 0) die();
+  }
+
+  /* lobby ghost sync */
+  if (lobbyCode) {
+    lobbySyncT -= dt;
+    if (lobbySyncT <= 0 && !lobbySyncing) {
+      lobbySyncT = 3.0;
+      lobbySyncing = true;
+      Lobby.pushState({ x: P.x, y: P.y, ang: P.ang, hp: P.hp, score, wave })
+        .then(lob => { applyLobby(lob); })
+        .catch(err => { console.warn('lobby sync', err); })
+        .finally(() => { lobbySyncing = false; });
+    }
+    for (const g of ghosts) {
+      const k = Math.min(1, dt * 3.5);
+      g.x += (g.tx - g.x) * k;
+      g.y += (g.ty - g.y) * k;
+      let da = g.tAng - g.ang;
+      while (da > Math.PI) da -= TAU;
+      while (da < -Math.PI) da += TAU;
+      g.ang += da * k;
+    }
+  }
+
+  /* spawns */
+  waveT += dt;
+  while (queue.length && queue[0].at <= waveT) { const q = queue.shift(); spawnEnemy(q.type, q.bi); };
+
+  /* enemies */
+  for (const e of enemies) {
+    if (e.dead) continue;
+    if (e.spawn > 0) { e.spawn -= dt; continue; }
+    e.flash = Math.max(0, e.flash - dt);
+
+    if (e.burn > 0) {
+      e.burn -= dt;
+      e.hp -= e.burnDps * dt;
+      if (parts.length < 900 && Math.random() < 0.5)
+        parts.push({ x: e.x + rnd(-e.r, e.r), y: e.y + rnd(-e.r, e.r), vx: rnd(-15, 15), vy: rnd(-70, -25), t: 0.35, max: 0.35, col: '#ff9f43', size: 4 });
+      if (e.hp <= 0) { killEnemy(e); continue; }
+    }
+    if (e.acid > 0) {
+      e.acid -= dt;
+      e.hp -= e.acidDps * dt;
+      if (parts.length < 900 && Math.random() < 0.4)
+        parts.push({ x: e.x + rnd(-e.r, e.r), y: e.y + rnd(-e.r, e.r), vx: rnd(-20, 20), vy: rnd(-10, 30), t: 0.4, max: 0.4, col: '#9cff57', size: 3 });
+      if (e.hp <= 0) { killEnemy(e); continue; }
+    }
+
+    const dx = P.x - e.x, dy = P.y - e.y, d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d;
+    const edt = e.freeze > 0 ? dt * (1 - Math.min(0.7, e.fz) * (e.boss ? 0.6 : 1)) : dt;
+    if (e.freeze > 0) { e.freeze -= dt; if (e.freeze <= 0) e.fz = 0; }
+
+    if (e.type === 'spitter') {
+      const m = d > 260 ? 1 : d < 200 ? -1 : 0;
+      e.x += (nx * m * e.sp - ny * e.sp * 0.45 * e.dir) * edt;
+      e.y += (ny * m * e.sp + nx * e.sp * 0.45 * e.dir) * edt;
+      e.x = clamp(e.x, 12, WW - 12); e.y = clamp(e.y, 12, WH - 12);
+      e.shootCd -= edt;
+      if (e.shootCd <= 0) { e.shootCd = 2.2; eb(e.x, e.y, nx * 230, ny * 230); snd(260, 0.1, 'square', 0.03, -100); }
+    } else if (e.boss) {
+      bossAI(e, edt, nx, ny);
+    } else {
+      e.x += nx * e.sp * edt; e.y += ny * e.sp * edt;
+    }
+    if (d < e.r + P.r) hurt(e.dmg, e.x, e.y);
+  }
+  for (let i = 0; i < enemies.length; i++) {
+    const a = enemies[i];
+    if (a.dead || a.spawn > 0) continue;
+    for (let j = i + 1; j < enemies.length; j++) {
+      const b = enemies[j];
+      if (b.dead || b.spawn > 0) continue;
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), m = a.r + b.r;
+      if (d < m && d > 0) {
+        const push = (m - d) / 2;
+        a.x -= dx / d * push; a.y -= dy / d * push;
+        b.x += dx / d * push; b.y += dy / d * push;
+      }
+    }
+  }
+
+  /* player bullets */
+  for (const b of bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.grenade) {
+      let boom = false;
+      if (b.life <= 0) boom = true;
+      for (const e of enemies) {
+        if (e.dead || e.spawn > 0) continue;
+        if (Math.hypot(b.x - e.x, b.y - e.y) < e.r + b.r) { boom = true; break; }
+      }
+      if (boom) { b.dead = true; explode(b.x, b.y, b); continue; }
+      if (b.x < -20 || b.x > WW + 20 || b.y < -20 || b.y > WH + 20) { b.dead = true; continue; }
+      continue;
+    }
+    if (b.life <= 0 || b.x < -20 || b.x > WW + 20 || b.y < -20 || b.y > WH + 20) { b.dead = true; continue; }
+    let hitSomething = false;
+    for (const e of enemies) {
+      if (e.dead || e.spawn > 0 || b.hits.includes(e)) continue;
+      if (Math.hypot(b.x - e.x, b.y - e.y) < e.r + b.r) {
+        b.hits.push(e);
+        burst(b.x, b.y, b.burn ? '#ff9f43' : b.acid ? '#9cff57' : b.freeze ? '#7fe7ff' : (b.col || '#ffe27a'), 3, 130, 0.25, 2);
+        hitEnemy(e, b.dmg || 1);
+        if (!e.dead) applyRounds(e, b);
+        snd(240, 0.04, 'triangle', 0.02);
+        if (b.pierce > 0) b.pierce--; else b.dead = true;
+        hitSomething = true;
+        break;
+      }
+    }
+    if (!b.dead && !hitSomething) {
+      for (const g of ghosts) {
+        if (b.hits.includes(g)) continue;
+        if (Math.hypot(b.x - g.x, b.y - g.y) < 16 + b.r) {
+          b.hits.push(g);
+          burst(b.x, b.y, g.col, 4, 150, 0.3, 2.5);
+          floatText(g.x, g.y - 22, 'Hit!', g.col, 14);
+          g.flash = 0.3;
+          score += 10;
+          snd(700, 0.06, 'square', 0.03, -200);
+          if (b.pierce > 0) b.pierce--; else b.dead = true;
+          break;
+        }
+      }
+    }
+  }
+
+  /* enemy bullets */
+  for (const b of ebullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.life <= 0 || b.x < -20 || b.x > WW + 20 || b.y < -20 || b.y > WH + 20) { b.dead = true; continue; }
+    if (Math.hypot(b.x - P.x, b.y - P.y) < P.r + 5) {
+      const was = P.inv <= 0 && P.dashT <= 0;
+      hurt(13, b.x, b.y);
+      if (was || P.shield > 0) b.dead = true;
+    }
+  }
+
+  /* pickups */
+  for (const p of pickups) {
+    p.life -= dt;
+    const dx = P.x - p.x, dy = P.y - p.y, d = Math.hypot(dx, dy);
+    if (d < 110) { p.x += dx / (d || 1) * 180 * dt; p.y += dy / (d || 1) * 180 * dt; }
+    if (p.life <= 0) p.dead = true;
+    if (d < P.r + 14) {
+      p.dead = true;
+      const c = PICK[p.type].col;
+      rings.push({ x: P.x, y: P.y, r: 10, max: 40, t: 0, dur: 0.3, col: c });
+      if (p.type === 'health') { P.hp = Math.min(P.max, P.hp + 30); floatText(P.x, P.y - 24, '+30 health', c, 16); }
+      else if (p.type === 'rapid') { P.rapid = 8; floatText(P.x, P.y - 24, 'Rapid fire', c, 16); }
+      else if (p.type === 'shield') { P.shield = 6; floatText(P.x, P.y - 24, 'Shield', c, 16); }
+      else { floatText(P.x, P.y - 24, 'Nova', c, 16); nova(); }
+      snd(600, 0.15, 'triangle', 0.06, 400);
+    }
+  }
+
+  updateFx(dt);
+
+  bullets = bullets.filter(b => !b.dead);
+  ebullets = ebullets.filter(b => !b.dead);
+  enemies = enemies.filter(e => !e.dead);
+  pickups = pickups.filter(p => !p.dead);
+
+  /* wave flow */
+  if (state === 'play') {
+    if (mode === 'pvp') {
+      waveT += dt;
+      if (waveT > 25) { waveT = 0; wave++; banner = 'Wave ' + wave; bannerT = 2; }
+    } else {
+      if (interT < 0 && queue.length === 0 && enemies.length === 0) {
+        interT = 2.4;
+        P.hp = Math.min(P.max, P.hp + 12);
+        const bonus = wave * 50;
+        score += bonus;
+        banner = 'Wave ' + wave + ' cleared'; bannerT = 2;
+        floatText(P.x, P.y - 28, '+' + bonus + ' bonus', '#ffe27a', 18);
+      }
+      if (interT >= 0) {
+        interT -= dt;
+        if (interT < 0) { interT = -1; nextWave(); }
+      }
+    }
+  }
+}
+
+/* ---------- drawing ---------- */
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+}
+function poly(n, r, rot = 0) {
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const a = rot + i / n * TAU, x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+function star(n, r1, r2) {
+  ctx.beginPath();
+  for (let i = 0; i < n * 2; i++) {
+    const a = i / (n * 2) * TAU, r = i % 2 ? r2 : r1, x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+function txt(s, x, y, size, col, align = 'left', weight = 700) {
+  ctx.font = weight + ' ' + size + 'px "Barlow Condensed","Arial Narrow",Arial,sans-serif';
+  ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = col;
+  ctx.fillText(s, x, y);
+}
+
+let vignette = null;
+function getVignette() {
+  if (!vignette) {
+    vignette = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95);
+    vignette.addColorStop(0, 'rgba(6,8,22,0)');
+    vignette.addColorStop(1, 'rgba(6,8,22,.7)');
+  }
+  return vignette;
+}
+
+function drawFloor() {
+  ctx.fillStyle = '#14172e';
+  ctx.fillRect(cam.x - 4, cam.y - 4, W + 8, H + 8);
+  ctx.strokeStyle = 'rgba(120,130,255,.07)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const gx0 = Math.floor(cam.x / 40) * 40;
+  const gy0 = Math.floor(cam.y / 40) * 40;
+  for (let x = gx0; x <= cam.x + W; x += 40) { ctx.moveTo(x + 0.5, cam.y); ctx.lineTo(x + 0.5, cam.y + H); }
+  for (let y = gy0; y <= cam.y + H; y += 40) { ctx.moveTo(cam.x, y + 0.5); ctx.lineTo(cam.x + W, y + 0.5); }
+  ctx.stroke();
+  ctx.strokeStyle = mode === 'pvp' ? 'rgba(255,107,107,.45)' : 'rgba(111,242,214,.4)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(6, 6, WW - 12, WH - 12);
+}
+
+function drawEnemy(e) {
+  const d = DEF[e.type];
+  const col = e.col || d.col;
+  if (e.spawn > 0) {
+    const k = e.spawn / (e.boss ? 1.2 : 0.7);
+    ctx.globalAlpha = 0.8; ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r * (1 + k * 1.6), 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 0.25; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r * (1 - k * 0.5), 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const a = Math.atan2(P.y - e.y, P.x - e.x);
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.fillStyle = 'rgba(0,0,0,.28)';
+  ctx.beginPath(); ctx.ellipse(0, e.r * 0.6, e.r, e.r * 0.45, 0, 0, TAU); ctx.fill();
+  const fill = e.flash > 0 ? '#ffffff' : col;
+  if (e.type === 'grunt') {
+    ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(0, 0, e.r, 0, TAU); ctx.fill();
+    ctx.rotate(a);
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.arc(0, 0, e.r * 0.55, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#1a1030';
+    ctx.beginPath(); ctx.arc(e.r * 0.45, -e.r * 0.3, e.r * 0.2, 0, TAU); ctx.arc(e.r * 0.45, e.r * 0.3, e.r * 0.2, 0, TAU); ctx.fill();
+  } else if (e.type === 'runner') {
+    ctx.rotate(a); ctx.fillStyle = fill; poly(3, e.r * 1.25); ctx.fill();
+  } else if (e.type === 'tank') {
+    ctx.rotate(time * 0.4); ctx.fillStyle = fill; poly(6, e.r); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.3)'; poly(6, e.r * 0.6); ctx.fill();
+  } else if (e.type === 'spitter') {
+    ctx.rotate(a); ctx.fillStyle = fill; poly(4, e.r * 1.2); ctx.fill();
+    ctx.fillStyle = '#1d3a1d'; ctx.beginPath(); ctx.arc(0, 0, e.r * 0.45, 0, TAU); ctx.fill();
+  } else if (e.boss) {
+    const rage = e.hp < e.max * 0.5, B = BOSSES[e.bi];
+    ctx.rotate(time * (rage ? 1.2 : 0.5) * (e.bi % 2 ? -1 : 1));
+    ctx.fillStyle = fill; star(B.n, e.r * 1.15, e.r * 1.15 * B.k); ctx.fill();
+    ctx.fillStyle = rage ? 'rgba(80,0,20,.7)' : 'rgba(0,0,0,.45)';
+    ctx.beginPath(); ctx.arc(0, 0, e.r * 0.6, 0, TAU); ctx.fill();
+    ctx.rotate(-time * (rage ? 1.2 : 0.5) * (e.bi % 2 ? -1 : 1));
+    ctx.fillStyle = e.tele > 0 && Math.floor(time * 20) % 2 ? '#fff' : e.col;
+    ctx.beginPath(); ctx.arc(0, 0, e.r * 0.25, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+  if (e.burn > 0) {
+    ctx.globalAlpha = 0.5 + 0.3 * Math.sin(time * 18);
+    ctx.strokeStyle = '#ff9f43'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 3, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  if (e.acid > 0) {
+    ctx.globalAlpha = 0.5 + 0.3 * Math.sin(time * 14 + 1);
+    ctx.strokeStyle = '#9cff57'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 5, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  if (e.freeze > 0) {
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = '#7fe7ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 4, 0, TAU); ctx.stroke();
+    ctx.fillStyle = 'rgba(127,231,255,.18)'; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  if (!e.boss && e.hp < e.max) {
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(e.x - 14, e.y - e.r - 9, 28, 4);
+    ctx.fillStyle = col; ctx.fillRect(e.x - 14, e.y - e.r - 9, 28 * e.hp / e.max, 4);
+  }
+}
+
+function drawGhost(g) {
+  ctx.save();
+  ctx.translate(g.x, g.y);
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.ellipse(0, 8, 12, 5, 0, 0, TAU); ctx.fill();
+  ctx.rotate(g.ang);
+  const t = TANKS.find(x => x.id === g.tankId) || TANKS[0];
+  ctx.globalAlpha = 0.7;
+  ctx.fillStyle = '#e8ebff'; ctx.fillRect(t.r * 0.5, -4, 16, 8);
+  ctx.fillStyle = g.flash > 0 ? '#ffffff' : g.col;
+  if (t.sides) poly(t.sides, t.r * 1.05); else { ctx.beginPath(); ctx.arc(0, 0, t.r, 0, TAU); }
+  ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.4)';
+  ctx.beginPath(); ctx.arc(-t.r * 0.18, 0, t.r * 0.5, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  ctx.strokeStyle = g.col; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(g.x, g.y, 20, 0, TAU); ctx.stroke();
+  txt(g.name, g.x, g.y - 26, 15, g.col, 'center');
+  txt(String(g.score), g.x, g.y - 42, 13, '#e8ebff', 'center', 500);
+}
+
+function drawWorld() {
+  /* rings */
+  for (const r of rings) {
+    const k = r.t / r.dur;
+    ctx.globalAlpha = 1 - k; ctx.strokeStyle = r.col; ctx.lineWidth = 3 * (1 - k) + 1;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r + (r.max - r.r) * k, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  /* pickups */
+  for (const p of pickups) {
+    if (p.life < 3 && Math.floor(time * 10) % 2) continue;
+    const c = PICK[p.type].col, bob = Math.sin(time * 4 + p.x) * 2;
+    ctx.globalAlpha = 0.25; ctx.fillStyle = c;
+    ctx.beginPath(); ctx.arc(p.x, p.y + bob, 18, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#12142a'; ctx.strokeStyle = c; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y + bob, 12, 0, TAU); ctx.fill(); ctx.stroke();
+    txt(PICK[p.type].ch, p.x, p.y + bob + 6, 18, c, 'center');
+  }
+
+  /* lobby ghosts */
+  for (const g of ghosts) { g.flash = Math.max(0, g.flash - 0.016); drawGhost(g); }
+
+  /* boss charge telegraphs */
+  for (const e of enemies) {
+    if (e.boss && e.tele > 0) {
+      ctx.strokeStyle = 'rgba(255,61,129,.55)'; ctx.lineWidth = 3; ctx.setLineDash([12, 10]);
+      ctx.beginPath(); ctx.moveTo(e.x, e.y); ctx.lineTo(e.x + e.cx * 600, e.y + e.cy * 600); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  for (const e of enemies) if (!e.boss) drawEnemy(e);
+  for (const e of enemies) if (e.boss) drawEnemy(e);
+
+  /* enemy bullets */
+  for (const b of ebullets) {
+    ctx.globalAlpha = 0.3; ctx.fillStyle = '#ff4d6d';
+    ctx.beginPath(); ctx.arc(b.x, b.y, 9, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, 2, 0, TAU); ctx.fill();
+  }
+
+  /* player bullets */
+  ctx.lineCap = 'round'; ctx.lineWidth = 3;
+  for (const b of bullets) {
+    if (b.grenade) {
+      ctx.fillStyle = '#9cff57';
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 2, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#1a3a0a';
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r - 1, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#9cff57'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 5, 0, TAU); ctx.stroke();
+      continue;
+    }
+    ctx.strokeStyle = b.burn ? '#ff9f43' : b.acid ? '#9cff57' : b.freeze ? '#7fe7ff' : (b.col || '#ffe27a');
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y);
+    ctx.lineTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03);
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+
+  /* laser beams */
+  for (const b of beams) {
+    const k = 1 - b.t / b.dur;
+    ctx.globalAlpha = k;
+    ctx.strokeStyle = b.col;
+    ctx.lineWidth = 5 + 4 * k;
+    ctx.beginPath(); ctx.moveTo(b.x1, b.y1); ctx.lineTo(b.x2, b.y2); ctx.stroke();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(b.x1, b.y1); ctx.lineTo(b.x2, b.y2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  /* player */
+  if (P.hp > 0 && (state === 'play' || state === 'pause')) {
+    /* dark energy forcefield ring */
+    if (P.forceMax > 0 && P.force > 0) {
+      const k = P.force / P.forceMax;
+      const pulse = 1 + 0.06 * Math.sin(time * 6);
+      ctx.globalAlpha = 0.16 + 0.24 * k;
+      ctx.fillStyle = '#a855f7';
+      ctx.beginPath(); ctx.arc(P.x, P.y, (P.r + 10) * pulse, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.55 + 0.4 * k;
+      ctx.strokeStyle = '#c084fc';
+      ctx.lineWidth = 2 + 3 * k;
+      ctx.beginPath(); ctx.arc(P.x, P.y, (P.r + 10) * pulse, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 0.35 * k;
+      ctx.strokeStyle = '#7c3aed';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(P.x, P.y, (P.r + 15) * pulse, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.save();
+    ctx.translate(P.x, P.y);
+    if (P.inv > 0 && P.dashT <= 0 && Math.floor(time * 30) % 2) ctx.globalAlpha = 0.4;
+    ctx.fillStyle = 'rgba(0,0,0,.3)';
+    ctx.beginPath(); ctx.ellipse(0, 8, 12, 5, 0, 0, TAU); ctx.fill();
+    ctx.rotate(P.ang);
+    drawTankShape(curTank(), P.r);
+    if (mode === 'pvp' || lobbyCode) {
+      ctx.strokeStyle = teamCol(); ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(0, 0, P.r + 6, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+    if (P.shield > 0) {
+      ctx.globalAlpha = P.shield < 1.5 ? 0.5 + 0.5 * Math.sin(time * 30) : 0.9;
+      ctx.strokeStyle = '#5cc8ff'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(P.x, P.y, 19, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* particles + floating texts */
+  for (const p of parts) {
+    ctx.globalAlpha = clamp(p.t / p.max, 0, 1);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const t of texts) {
+    ctx.globalAlpha = clamp(t.t / 0.4, 0, 1);
+    txt(t.txt, t.x, t.y, t.size, t.col, 'center');
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  const lvl = weaponLevel();
+  /* health bar */
+  rr(20, 18, 220, 16, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  const hpk = clamp(P.hp / P.max, 0, 1);
+  if (hpk > 0) {
+    rr(20, 18, Math.max(10, 220 * hpk), 16, 8);
+    ctx.fillStyle = P.hp > 50 ? '#6dff9c' : P.hp > 25 ? '#ffd166' : '#ff4d6d';
+    ctx.fill();
+  }
+  txt(String(Math.ceil(P.hp)), 30, 31, 14, '#0a0c1c');
+  /* forcefield bar */
+  if (P.forceMax > 0) {
+    rr(250, 18, 100, 16, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+    const fk = clamp(P.force / P.forceMax, 0, 1);
+    if (fk > 0) {
+      rr(250, 18, Math.max(8, 100 * fk), 16, 8);
+      ctx.fillStyle = '#a855f7'; ctx.fill();
+    }
+    txt(String(Math.ceil(P.force)), 260, 31, 14, '#e8ebff');
+  }
+  /* dash bar */
+  rr(20, 42, 120, 6, 3); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  rr(20, 42, Math.max(6, 120 * (1 - clamp(P.dashCd / 1.1, 0, 1))), 6, 3);
+  ctx.fillStyle = P.dashCd <= 0 ? '#6ff2d6' : 'rgba(111,242,214,.45)'; ctx.fill();
+  /* weapon pips */
+  for (let i = 0; i < 5; i++) {
+    rr(20 + i * 18, 58, 14, 6, 2);
+    ctx.fillStyle = i < lvl ? '#ffe27a' : 'rgba(255,255,255,.15)'; ctx.fill();
+  }
+  const w = curW();
+  txt(w.name + ' · Lv ' + lvl, 116, 65, 14, w.col);
+  let ty = 86;
+  if (P.rapid > 0) { txt('Rapid fire ' + P.rapid.toFixed(1) + 's', 20, ty, 16, '#ffe27a'); ty += 20; }
+  if (P.shield > 0) { txt('Shield ' + P.shield.toFixed(1) + 's', 20, ty, 16, '#5cc8ff'); ty += 20; }
+  if (upg[4] > 0) { txt('Flamethrower ' + upg[4], 20, ty, 16, '#ff9f43'); ty += 20; }
+  if (acidOn()) { txt('Acid rounds ' + upg[5], 20, ty, 16, '#9cff57'); ty += 20; }
+  if (upg[6] > 0) { txt('Freeze ray ' + upg[6], 20, ty, 16, '#7fe7ff'); }
+
+  /* centre info */
+  txt('Wave ' + wave, W / 2, 36, 28, '#e8ebff', 'center');
+  const sub = lobbyCode ? ('Lobby ' + lobbyCode + ' · ' + teamName())
+            : mode === 'pvp' ? ('PvP · ' + teamName())
+            : ('Survival · ' + teamName());
+  txt(sub, W / 2, 58, 16, lobbyCode ? '#6ff2d6' : mode === 'pvp' ? teamCol() : '#9aa0d6', 'center', 500);
+
+  /* score */
+  txt(String(score), W - 20, 38, 32, '#e8ebff', 'right');
+  txt('Best ' + Math.max(best, score), W - 20, 58, 16, '#9aa0d6', 'right', 500);
+  if (combo >= 2) {
+    const mult = 1 + Math.min(4, Math.floor(combo / 5));
+    txt('Combo ' + combo + '  x' + mult, W - 20, 82, 20, '#ffe27a', 'right');
+    ctx.fillStyle = 'rgba(255,226,122,.7)';
+    ctx.fillRect(W - 20 - 100 * (comboT / 2.5), 88, 100 * (comboT / 2.5), 3);
+  }
+  if (lobbyCode) {
+    let y = 118;
+    txt('— Lobby —', W - 20, y, 15, '#6ff2d6', 'right', 500); y += 18;
+    const rows = [...lobbyPlayers].sort((a, b) => (b.score || 0) - (a.score || 0));
+    rows.slice(0, 6).forEach(p => {
+      const t = TEAMS.find(x => x.id === p.team) || TEAMS[0];
+      const isMe = p.id === Lobby.myId;
+      txt((isMe ? '▶ ' : '') + p.name, W - 20, y, 15, isMe ? '#ffe27a' : t.col, 'right', 500);
+      txt(String(p.score || 0), W - 130, y, 15, '#9aa0d6', 'right', 500);
+      y += 17;
+    });
+  }
+
+  /* boss bars */
+  const bosses = enemies.filter(e => e.boss && !e.dead && e.spawn <= 0);
+  if (bosses.length > 0) {
+    txt(bosses.length > 1 ? 'Bosses x' + bosses.length : bosses[0].bname, W / 2, H - 44, 16, bosses[0].col, 'center');
+    const barW = 420 / bosses.length;
+    bosses.forEach((bs, i) => {
+      rr((W - 420) / 2 + i * barW, H - 36, barW - 4, 12, 6); ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fill();
+      rr((W - 420) / 2 + i * barW, H - 36, Math.max(8, (barW - 4) * bs.hp / bs.max), 12, 6); ctx.fillStyle = bs.col || '#ff3d81'; ctx.fill();
+    });
+  }
+
+  if (mode === 'pvp' && state === 'play') {
+    const mins = Math.floor(matchTimer / 60);
+    const secs = Math.floor(matchTimer % 60).toString().padStart(2, '0');
+    txt(mins + ':' + secs, W / 2, 90, 32, matchTimer < 20 ? '#ff4d6d' : '#ffe27a', 'center');
+  }
+
+  /* banner */
+  if (bannerT > 0) {
+    ctx.globalAlpha = clamp(bannerT / 0.6, 0, 1);
+    txt(banner, W / 2, H * 0.3, 58, '#e8ebff', 'center');
+    if (interT > 0) txt('Next wave in ' + Math.ceil(interT), W / 2, H * 0.3 + 34, 22, '#9aa0d6', 'center', 500);
+    ctx.globalAlpha = 1;
+  }
+  if (lobbyMsgT > 0) {
+    ctx.globalAlpha = clamp(lobbyMsgT, 0, 1);
+    txt(lobbyMsg, W / 2, H * 0.72, 26, '#ffe27a', 'center');
+    ctx.globalAlpha = 1;
+  }
+  /* virtual joystick */
+  if (joy.id !== null) {
+    ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 60, 0, TAU); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.25)';
+    ctx.beginPath(); ctx.arc(joy.ox + joy.x * 60, joy.oy + joy.y * 60, 22, 0, TAU); ctx.fill();
+  }
+  /* aim reticle */
+  if (state === 'play') {
+    const ax = aim.x - cam.x, ay = aim.y - cam.y;
+    ctx.strokeStyle = autoFire ? 'rgba(168,85,247,.85)' : 'rgba(255,255,255,.75)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(ax, ay, 9, 0, TAU);
+    ctx.moveTo(ax - 15, ay); ctx.lineTo(ax - 6, ay);
+    ctx.moveTo(ax + 15, ay); ctx.lineTo(ax + 6, ay);
+    ctx.moveTo(ax, ay - 15); ctx.lineTo(ax, ay - 6);
+    ctx.moveTo(ax, ay + 15); ctx.lineTo(ax, ay + 6);
+    ctx.stroke();
+    if (autoFire) {
+      txt('AUTO', ax + 14, ay - 12, 13, '#a855f7', 'left', 500);
+    }
+  }
+
+  /* auto-fire toggle button (bottom-left) */
+  const bx = 20, by = H - 58, bw = 190, bh = 40;
+  rr(bx, by, bw, bh, 10);
+  ctx.fillStyle = autoFire ? 'rgba(168,85,247,.25)' : 'rgba(255,255,255,.08)';
+  ctx.fill();
+  ctx.strokeStyle = autoFire ? '#a855f7' : 'rgba(255,255,255,.25)';
+  ctx.lineWidth = 2; ctx.stroke();
+  txt('Auto-fire (H): ' + (autoFire ? 'ON' : 'OFF'), bx + bw / 2, by + 27, 18,
+      autoFire ? '#c084fc' : '#9aa0d6', 'center');
+
+  /* mini map (bottom-right, useful with the bigger map) */
+  if (state === 'play') {
+    const mw = 140, mh = 94;
+    const mx = W - mw - 20, my = H - mh - 20;
+    rr(mx, my, mw, mh, 6);
+    ctx.fillStyle = 'rgba(8,10,26,.65)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(111,242,214,.4)'; ctx.lineWidth = 1.5; ctx.stroke();
+    const sx = mw / WW, sy = mh / WH;
+    for (const e of enemies) {
+      if (e.dead || e.spawn > 0) continue;
+      ctx.fillStyle = e.boss ? '#ff3d81' : (e.col || '#ff6b6b');
+      const r = e.boss ? 3 : 2;
+      ctx.fillRect(mx + e.x * sx - r / 2, my + e.y * sy - r / 2, r, r);
+    }
+    ctx.fillStyle = '#6ff2d6';
+    ctx.fillRect(mx + P.x * sx - 2, my + P.y * sy - 2, 4, 4);
+    ctx.strokeStyle = 'rgba(255,255,255,.35)';
+    ctx.strokeRect(mx + cam.x * sx, my + cam.y * sy, W * sx, H * sy);
+  }
+}
+
+function dim(a) { ctx.fillStyle = 'rgba(8,9,22,' + a + ')'; ctx.fillRect(0, 0, W, H); }
+
+function drawMenu() {
+  dim(0.45);
+  txt('Holdout', W / 2, 190, 120, '#6ff2d6', 'center');
+  txt('Survive the waves. Take down the bosses.', W / 2, 236, 28, '#e8ebff', 'center', 500);
+  const lines = [
+    ['Move', 'WASD or arrow keys'],
+    ['Aim', 'Mouse / right thumb'],
+    ['Dash', 'Space or Shift'],
+    ['Auto-fire', 'H = switch that fires on its own'],
+    ['Pause and mute', 'P and M']
+  ];
+  lines.forEach((l, i) => {
+    txt(l[0], W / 2 - 14, 286 + i * 28, 22, '#9aa0d6', 'right', 500);
+    txt(l[1], W / 2 + 14, 286 + i * 28, 22, '#e8ebff', 'left', 500);
+  });
+  txt('On touch: left thumb moves, right thumb aims and fires', W / 2, 442, 18, '#9aa0d6', 'center', 500);
+  txt('Team ' + teamName() + '  ·  ' + (mode === 'pvp' ? 'PvP Duel' : 'Survival'), W / 2, 470, 22, mode === 'pvp' ? teamCol() : '#9aa0d6', 'center', 500);
+  const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ctx.globalAlpha = pulse;
+  txt('Click or press Enter to start solo', W / 2, 508, 30, '#ffe27a', 'center');
+  ctx.globalAlpha = 1;
+  txt('Press C to create a PvP lobby code · J to join with a code', W / 2, 540, 20, '#6ff2d6', 'center', 500);
+  Board.draw(566, 3);
+  drawNav();
+}
+
+function drawOver() {
+  dim(0.7);
+  txt('Overrun', W / 2, 170, 90, '#ff6b6b', 'center');
+  txt('Score ' + score, W / 2, 226, 44, '#e8ebff', 'center');
+  if (newBest) txt('New best score', W / 2, 258, 22, '#ffe27a', 'center');
+  else txt('Best ' + best, W / 2, 258, 20, '#9aa0d6', 'center', 500);
+  txt('Reached wave ' + wave + ' with ' + kills + ' kills', W / 2, 292, 22, '#c9cdf5', 'center', 500);
+  txt((lobbyCode ? 'Lobby ' + lobbyCode : mode === 'pvp' ? 'PvP Duel' : 'Survival') + ' · Team ' + teamName(), W / 2, 322, 22, lobbyCode ? '#6ff2d6' : mode === 'pvp' ? teamCol() : '#9aa0d6', 'center', 500);
+  txt('+' + earned + ' credits', W / 2, 352, 22, '#ffe27a', 'center');
+  if (performance.now() - overAt > 600) {
+    const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+    ctx.globalAlpha = pulse;
+    if (lobbyCode) txt('Press B to return to lobby', W / 2, 402, 30, '#6ff2d6', 'center');
+    else txt('Click or press R to play again', W / 2, 402, 30, '#ffe27a', 'center');
+    ctx.globalAlpha = 1;
+  }
+  if (lobbyCode) {
+    const rows = [...lobbyPlayers].sort((a, b) => (b.score || 0) - (a.score || 0));
+    txt('— Lobby scores —', W / 2, 442, 22, '#6ff2d6', 'center');
+    rows.slice(0, 6).forEach((p, i) => {
+      const t = TEAMS.find(x => x.id === p.team) || TEAMS[0];
+      const y = 468 + i * 22;
+      txt((i + 1) + '. ' + p.name, W / 2 - 20, y, 18, p.id === Lobby.myId ? '#ffe27a' : t.col, 'right');
+      txt(String(p.score || 0), W / 2 + 20, y, 18, '#e8ebff', 'left');
+    });
+  } else {
+    Board.draw(442, 4);
+  }
+  drawNav();
+}
+
+function drawPause() {
+  dim(0.6);
+  txt('Paused', W / 2, 290, 84, '#e8ebff', 'center');
+  txt('Press P or click to resume, R to restart', W / 2, 336, 24, '#9aa0d6', 'center', 500);
+  if (muted) txt('Sound is muted (M)', W / 2, 368, 20, '#9aa0d6', 'center', 500);
+  txt('Auto-fire: ' + (autoFire ? 'ON (fires on its own)' : 'OFF (hold to fire)') + '  ·  H to toggle', W / 2, 400, 20, autoFire ? '#c084fc' : '#9aa0d6', 'center', 500);
+}
+
+function navBtn(x, label, size) {
+  size = size || 20;
+  rr(x, 20, 110, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(111,242,214,.5)'; ctx.lineWidth = 2; ctx.stroke();
+  txt(label, x + 55, size > 18 ? 45 : 43, size, '#e8ebff', 'center');
+}
+function drawNav() {
+  navBtn(20, 'Store (S)'); navBtn(140, 'Board (L)'); navBtn(260, 'Garage (G)');
+  rr(380, 20, 110, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = teamCol(); ctx.lineWidth = 2; ctx.stroke();
+  txt('Team (T)', 435, 43, 15, teamCol(), 'center');
+  rr(500, 20, 110, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = mode === 'pvp' ? '#ff6b6b' : 'rgba(111,242,214,.5)'; ctx.lineWidth = 2; ctx.stroke();
+  txt(mode === 'pvp' ? 'PvP (V)' : 'Survival (V)', 555, 43, 15, mode === 'pvp' ? '#ff6b6b' : '#e8ebff', 'center');
+  rr(620, 20, 110, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = lobbyCode ? '#6ff2d6' : 'rgba(111,242,214,.5)'; ctx.lineWidth = 2; ctx.stroke();
+  txt(lobbyCode ? 'In Lobby' : 'Lobby (C)', 675, 43, 15, '#6ff2d6', 'center');
+  txt('Credits ' + credits, W - 20, 45, 24, '#ffe27a', 'right');
+}
+function drawStore() {
+  dim(0.6);
+  txt('Store', W / 2, 100, 64, '#6ff2d6', 'center');
+  txt('Credits ' + credits, W / 2, 132, 24, '#ffe27a', 'center');
+  navBtn(20, 'Back (B)');
+  navBtn(280, 'Upgrades'); navBtn(395, 'Tanks (T)'); navBtn(510, 'Weapons (T)');
+  ctx.fillStyle = '#6ff2d6';
+  ctx.fillRect(280 + storeTab * 115, 60, 110, 3);
+  if (storeTab === 1) { drawTankShop(); return; }
+  if (storeTab === 2) { drawWeaponShop(); return; }
+  UPG.forEach((u, i) => {
+    const y = 150 + i * 60, maxed = upg[i] >= MAXUPG, ok = !maxed && credits >= upgCost(i);
+    const isFire = i === 4, isAcid = i === 5, isFz = i === 6;
+    const accent = isFire ? '#ff9f43' : isAcid ? '#9cff57' : isFz ? '#7fe7ff' : '#6ff2d6';
+    rr(230, y, 500, 52, 10); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    ctx.strokeStyle = maxed ? 'rgba(255,226,122,.6)' : ok ? accent : 'rgba(255,255,255,.15)';
+    ctx.lineWidth = 2; ctx.stroke();
+    txt((i + 1) + '  ' + u.name, 250, y + 23, 22, isFire ? '#ff9f43' : isAcid ? '#9cff57' : isFz ? '#7fe7ff' : '#e8ebff');
+    txt(u.desc, 250, y + 43, 15, '#9aa0d6', 'left', 500);
+    for (let k = 0; k < MAXUPG; k++) {
+      rr(524 + k * 17, y + 10, 13, 8, 2);
+      ctx.fillStyle = k < upg[i] ? '#ffe27a' : 'rgba(255,255,255,.15)'; ctx.fill();
+    }
+    txt(maxed ? 'Maxed' : upgCost(i) + ' credits', 712, y + 42, 20, maxed ? '#9aa0d6' : ok ? '#ffe27a' : '#ff6b6b', 'right');
+  });
+  txt('Press 1-7 or tap an item to buy', W / 2, 594, 20, '#9aa0d6', 'center', 500);
+  txt('Credits are earned each run and saved on this device', W / 2, 618, 18, '#9aa0d6', 'center', 500);
+}
+function drawTankShape(t, r) {
+  const k = r / t.r;
+  ctx.fillStyle = '#e8ebff'; ctx.fillRect(r * 0.5, -t.bw * k / 2, t.bl * k, t.bw * k);
+  ctx.fillStyle = t.col;
+  if (t.sides) poly(t.sides, r * 1.1); else { ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); }
+  ctx.fill();
+  ctx.fillStyle = t.dk; ctx.beginPath(); ctx.arc(-r * 0.18, 0, r * 0.5, 0, TAU); ctx.fill();
+}
+function tankNameColor(t) {
+  if (t.id === 'thetank') return '#6dff9c';
+  if (t.id === 'wraith') return '#c084fc';
+  if (t.id === 'reaper') return '#ff6b9d';
+  return '#e8ebff';
+}
+function drawTankShop() {
+  TANKS.forEach((t, i) => {
+    const y = 130 + i * 60, own = ownedT.includes(t.id), eq = eqT === t.id, ok = !own && credits >= t.cost;
+    rr(200, y, 560, 54, 10); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    ctx.strokeStyle = eq ? '#6ff2d6' : ok ? '#ffe27a' : 'rgba(255,255,255,.15)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.save(); ctx.translate(240, y + 27); ctx.rotate(-0.3); drawTankShape(t, Math.min(t.r * 1.15, 17)); ctx.restore();
+    txt((i + 1) + '  ' + t.name, 280, y + 22, 21, tankNameColor(t));
+    txt(t.desc, 430, y + 22, 14, '#9aa0d6', 'left', 500);
+    txt(tankCompact(t), 280, y + 43, 13, '#c9cdf5', 'left', 500);
+    txt(eq ? 'Equipped' : own ? 'Owned' : t.cost + ' credits', 740, y + 34, 20, eq ? '#6ff2d6' : own ? '#9aa0d6' : ok ? '#ffe27a' : '#ff6b6b', 'right');
+  });
+  txt('Press 1-8 or tap a tank to buy it. Equip tanks in the Garage (G)', W / 2, 604, 19, '#9aa0d6', 'center', 500);
+}
+function drawWeaponShop() {
+  WEAPONS.forEach((w, i) => {
+    const y = 150 + i * 82, own = ownedW.includes(w.id), eq = eqW === w.id, ok = !own && credits >= w.cost;
+    rr(200, y, 560, 76, 10); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    ctx.strokeStyle = eq ? '#6ff2d6' : ok ? '#ffe27a' : 'rgba(255,255,255,.15)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.save(); ctx.translate(250, y + 38);
+    ctx.fillStyle = w.col;
+    if (w.id === 'blaster') { ctx.fillRect(-22, -6, 44, 12); ctx.fillStyle = '#e8ebff'; ctx.fillRect(10, -3, 16, 6); }
+    else if (w.id === 'minigun') { ctx.fillRect(-26, -10, 40, 20); ctx.fillStyle = '#e8ebff'; ctx.fillRect(2, -5, 24, 4); ctx.fillRect(2, -1, 24, 4); ctx.fillRect(2, 3, 24, 4); }
+    else if (w.id === 'grenade') { ctx.beginPath(); ctx.arc(0, 0, 12, 0, TAU); ctx.fill(); ctx.fillStyle = '#e8ebff'; ctx.fillRect(10, -3, 18, 6); }
+    else { ctx.fillRect(-26, -4, 46, 8); ctx.fillStyle = '#e8ebff'; ctx.fillRect(16, -8, 8, 16); }
+    ctx.restore();
+    txt((i + 1) + '  ' + w.name, 296, y + 26, 24, w.id === 'laser' ? '#7fe7ff' : w.id === 'minigun' ? '#ffa94d' : w.id === 'grenade' ? '#9cff57' : '#e8ebff');
+    txt(w.desc, 296, y + 48, 16, '#9aa0d6', 'left', 500);
+    txt(w.stat, 296, y + 68, 14, '#c9cdf5', 'left', 500);
+    txt(eq ? 'Equipped' : own ? 'Owned' : w.cost + ' credits', 740, y + 45, 22, eq ? '#6ff2d6' : own ? '#9aa0d6' : ok ? '#ffe27a' : '#ff6b6b', 'right');
+  });
+  txt('Press 1-4 or tap a weapon to buy / equip it', W / 2, 592, 20, '#9aa0d6', 'center', 500);
+}
+function drawGarage() {
+  dim(0.65);
+  txt('Garage', W / 2, 100, 64, '#6ff2d6', 'center');
+  txt('Credits ' + credits, W / 2, 132, 24, '#ffe27a', 'center');
+  navBtn(20, 'Back (B)');
+  TANKS.forEach((t, i) => {
+    const x = GX0 + i * GSTEP, own = ownedT.includes(t.id), eq = eqT === t.id;
+    rr(x, 150, GCW, 360, 12); ctx.fillStyle = 'rgba(255,255,255,' + (eq ? 0.14 : 0.07) + ')'; ctx.fill();
+    ctx.strokeStyle = eq ? '#6ff2d6' : 'rgba(255,255,255,.15)'; ctx.lineWidth = eq ? 3 : 2; ctx.stroke();
+    ctx.save(); ctx.globalAlpha = own ? 1 : 0.3;
+    ctx.translate(x + GCW / 2, 220); ctx.rotate(-0.4); drawTankShape(t, t.r * 1.6); ctx.restore();
+    ctx.save(); ctx.globalAlpha = own ? 1 : 0.55;
+    txt((i + 1) + '. ' + t.name, x + GCW / 2, 292, 18, tankNameColor(t), 'center');
+    txt(t.desc, x + GCW / 2, 310, 12, '#9aa0d6', 'center', 500);
+    tankStats(t).forEach((l, k) => txt(l, x + GCW / 2, 340 + k * 20, 13, '#c9cdf5', 'center', 500));
+    ctx.restore();
+    txt(eq ? 'Equipped' : own ? 'Equip' : 'Locked', x + GCW / 2, 488, 20, eq ? '#6ff2d6' : own ? '#ffe27a' : '#ff6b6b', 'center');
+  });
+  txt('Press 1-8 or tap a tank to equip it. Buy more in the Store (S, then T)', W / 2, 560, 20, '#9aa0d6', 'center', 500);
+}
+function drawBoardScreen() {
+  dim(0.7);
+  txt('Top scores', W / 2, 60, 48, '#6ff2d6', 'center');
+  Board.draw(90, 12);
+  Board.drawTeams(430);
+  txt('Click or press B to go back', W / 2, 610, 20, '#9aa0d6', 'center', 500);
+}
+
+/* ---------- lobby screen ---------- */
+function drawLobby() {
+  dim(0.68);
+  txt('PvP Lobby', W / 2, 72, 56, '#6ff2d6', 'center');
+
+  if (!lobbyCode) {
+    txt('Temporary codes · 2 or more players', W / 2, 130, 24, '#9aa0d6', 'center', 500);
+
+    rr(280, 200, 400, 80, 12); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
+    txt('Create Lobby', W / 2, 240, 34, '#6ff2d6', 'center');
+    txt('Generates a 5-character code', W / 2, 264, 18, '#9aa0d6', 'center', 500);
+
+    rr(280, 310, 400, 80, 12); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    ctx.strokeStyle = '#ffe27a'; ctx.lineWidth = 2; ctx.stroke();
+    txt('Join with Code', W / 2, 350, 34, '#ffe27a', 'center');
+    txt('Ask your friend for their code', W / 2, 374, 18, '#9aa0d6', 'center', 500);
+
+    txt('Your name: ' + (getPlayerName() || '(asked on first score)'), W / 2, 440, 22, '#c9cdf5', 'center', 500);
+    txt('Your team: ' + teamName() + '  (T to change)', W / 2, 466, 22, teamCol(), 'center', 500);
+
+    navBtn(20, 'Back (B)');
+    txt('Lobbies auto-expire after 45 minutes of inactivity', W / 2, 600, 18, '#9aa0d6', 'center', 500);
+    return;
+  }
+
+  txt('Code: ' + lobbyCode, W / 2, 118, 40, '#ffe27a', 'center');
+  txt('Share this code with 2+ friends · ' + lobbyPlayers.length + '/8 players', W / 2, 146, 18, '#9aa0d6', 'center', 500);
+
+  const startY = 176;
+  lobbyPlayers.forEach((p, i) => {
+    const t = TEAMS.find(x => x.id === p.team) || TEAMS[0];
+    const y = startY + i * 42;
+    const isMe = p.id === Lobby.myId;
+    const isHost = p.id === lobbyHostId;
+    rr(230, y, 500, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fill();
+    ctx.strokeStyle = isMe ? '#6ff2d6' : t.col; ctx.lineWidth = 2; ctx.stroke();
+    txt(p.name + (isMe ? ' (you)' : ''), 250, y + 25, 22, isMe ? '#ffe27a' : '#e8ebff');
+    txt(t.name, 560, y + 25, 20, t.col, 'left');
+    if (isHost) txt('HOST', 720, y + 25, 18, '#ffe27a', 'right');
+    if (p.offline) txt('offline', 660, y + 25, 14, '#ff6b6b', 'right', 500);
+  });
+
+  const btnY = startY + Math.max(lobbyPlayers.length, 1) * 42 + 20;
+  if (lobbyIsHost) {
+    rr(280, btnY, 400, 60, 12); ctx.fillStyle = 'rgba(111,242,214,.16)'; ctx.fill();
+    ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
+    txt('Start Match (Enter)', W / 2, btnY + 40, 30, '#6ff2d6', 'center');
+  } else {
+    rr(280, btnY, 400, 60, 12); ctx.fillStyle = 'rgba(255,255,255,.06)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.2)'; ctx.lineWidth = 2; ctx.stroke();
+    txt('Waiting for host…', W / 2, btnY + 40, 26, '#9aa0d6', 'center', 500);
+  }
+
+  navBtn(20, 'Leave (Esc)');
+  rr(680, 20, 170, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
+  txt('Refresh (R)', 765, 43, 18, '#6ff2d6', 'center');
+  txt('T to change team · the host starts the match for everyone', W / 2, 600, 18, '#9aa0d6', 'center', 500);
+
+  if (lobbyMsgT > 0) {
+    ctx.globalAlpha = clamp(lobbyMsgT, 0, 1);
+    txt(lobbyMsg, W / 2, 568, 22, '#ffe27a', 'center');
+    ctx.globalAlpha = 1;
+  }
+}
+function lobbyClick(p) {
+  if (p.x > 20 && p.x < 130 && p.y < 64) { leaveLobby(); return; }
+  if (p.x > 680 && p.x < 850 && p.y > 20 && p.y < 60) { pollLobby(); lobbyMsg = 'Refreshing...'; lobbyMsgT = 1; return; }
+  if (!lobbyCode) {
+    if (p.x > 280 && p.x < 680 && p.y > 200 && p.y < 280) { createLobby(); return; }
+    if (p.x > 280 && p.x < 680 && p.y > 310 && p.y < 390) { joinLobbyPrompt(); return; }
+    return;
+  }
+  if (lobbyIsHost) {
+    const btnY = 176 + Math.max(lobbyPlayers.length, 1) * 42 + 20;
+    if (p.x > 280 && p.x < 680 && p.y > btnY && p.y < btnY + 60) {
+      Lobby.start().then(() => pollLobby());
+    }
+  }
+}
+
+function draw() {
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.save();
+  if (shake > 0.3) ctx.translate(rnd(-shake, shake), rnd(-shake, shake));
+
+  if (state === 'play' || state === 'pause' || state === 'over') {
+    ctx.save();
+    ctx.translate(-cam.x, -cam.y);
+    drawFloor();
+    drawWorld();
+    ctx.restore();
+  } else {
+    ctx.fillStyle = '#14172e';
+    ctx.fillRect(0, 0, W, H);
+    for (const p of parts) {
+      ctx.globalAlpha = clamp(p.t / p.max, 0, 1) * 0.6;
+      ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  ctx.fillStyle = getVignette(); ctx.fillRect(0, 0, W, H);
+  if (flash > 0) { ctx.fillStyle = 'rgba(255,60,80,' + (flash * 0.35) + ')'; ctx.fillRect(0, 0, W, H); }
+
+  if (state === 'play' || state === 'pause' || state === 'over') drawHUD();
+  if (state === 'menu') drawMenu();
+  else if (state === 'store') drawStore();
+  else if (state === 'board') drawBoardScreen();
+  else if (state === 'garage') drawGarage();
+  else if (state === 'lobby') drawLobby();
+  else if (state === 'over') drawOver();
+  else if (state === 'pause') drawPause();
+}
+
+/* ---------- leaderboard (localStorage + JSONBin) ---------- */
+const Board = (() => {
+  const BIN_ID = '6ac67438ac6210605a1cf2de';
+  const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
+  const URL = 'https://api.jsonbin.io/v3/b/' + BIN_ID;
+  const MAX = 100;
+  const online = !BIN_ID.startsWith('YOUR_');
+  let local = load('holdout_scores');
+  let remote = [];
+  let status = online ? 'Loading' : 'This device only';
+  let mine = null;
+  let lastName = getPlayerName();
+
+  function load(k) {
+    try { return clean(JSON.parse(localStorage.getItem(k))); } catch (e) { return []; }
+  }
+  function clean(a) {
+    if (!Array.isArray(a)) return [];
+    return a.filter(s => s && typeof s.score === 'number' && isFinite(s.score))
+      .map(s => ({
+        id: String(s.id || ''),
+        name: String(s.name || 'Player').slice(0, 12),
+        team: TEAMS.some(t => t.id === s.team) ? s.team : '',
+        mode: s.mode === 'pvp' ? 'pvp' : 'surv',
+        score: Math.floor(s.score),
+        wave: s.wave | 0,
+        kills: s.kills | 0
+      }));
+  }
+  function merge(...lists) {
+    const seen = new Set(), out = [];
+    for (const s of lists.flat().sort((a, b) => b.score - a.score)) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id); out.push(s);
+    }
+    return out.slice(0, MAX);
+  }
+  const hdr = extra => Object.assign({ 'X-Master-Key': KEY }, extra || {});
+
+  async function refresh() {
+    if (!online) return;
+    try {
+      const r = await fetch(URL + '/latest', { headers: hdr() });
+      if (!r.ok) throw new Error(r.status);
+      const rec = await r.json();
+      remote = merge(clean((rec.record && rec.record.scores) || []));
+      status = 'Online';
+    } catch (e) { status = 'Error ' + e.message; console.error(e); }
+  }
+
+  async function submit(entry) {
+    local = merge(local, [entry]);
+    try { localStorage.setItem('holdout_scores', JSON.stringify(local)); } catch (e) {}
+    if (!online) return;
+    status = 'Saving';
+    try {
+      const r = await fetch(URL + '/latest', { headers: hdr() });
+      if (!r.ok) throw new Error(r.status);
+      const rec = (await r.json()).record || {};
+      const next = merge(clean(rec.scores || []), [entry]);
+      const w = await fetch(URL, {
+        method: 'PUT',
+        headers: hdr({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(Object.assign({}, rec, { scores: next }))
+      });
+      if (!w.ok) throw new Error(w.status);
+      remote = next; status = 'Online';
+    } catch (e) { status = 'Error ' + e.message + ', saved on device'; console.error(e); }
+  }
+
+  function onGameOver(score, wave, kills) {
+    if (score <= 0) return;
+    setTimeout(() => {
+      if (!lastName) {
+        let name = null;
+        try {
+          name = prompt('Score ' + score + '. Pick a username (it is yours forever):', 'Player');
+        } catch (e) {}
+        if (name === null || name === undefined) return;
+        name = String(name).trim().slice(0, 12) || 'Player';
+        lastName = name;
+        setPlayerName(name);
+      }
+      mine = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      submit({ id: mine, name: lastName, team, mode: lobbyCode ? 'pvp' : mode === 'pvp' ? 'pvp' : 'surv', score, wave, kills });
+    }, 700);
+  }
+
+  function list() { return merge(remote, local); }
+
+  function draw(y, n) {
+    const rows = list().slice(0, n), cx = W / 2;
+    txt('Leaderboard', cx - 170, y, 20, '#6ff2d6', 'left');
+    txt(status, cx + 170, y, 14, '#9aa0d6', 'right', 500);
+    if (!rows.length) { txt('No scores yet', cx, y + 24, 18, '#9aa0d6', 'center', 500); return; }
+    rows.forEach((s, i) => {
+      const yy = y + 24 + i * 20, col = s.id === mine ? '#ffe27a' : '#e8ebff';
+      const t = TEAMS.find(x => x.id === s.team);
+      txt(String(i + 1), cx - 160, yy, 17, '#9aa0d6', 'right', 500);
+      txt(s.name, cx - 148, yy, 17, col, 'left');
+      txt(t ? t.name.slice(0, 3).toUpperCase() : '---', cx + 20, yy, 13, t ? t.col : '#9aa0d6', 'left', 500);
+      txt(s.mode === 'pvp' ? 'PvP' : 'W' + s.wave, cx + 78, yy, 13, s.mode === 'pvp' ? '#ff6b6b' : '#9aa0d6', 'left', 500);
+      txt(String(s.score), cx + 170, yy, 17, col, 'right');
+    });
+  }
+
+  function drawTeams(y) {
+    const rows = list(), cx = W / 2, step = 165, x0 = cx - 322;
+    txt('Team standings', cx, y - 16, 20, '#6ff2d6', 'center');
+    TEAMS.forEach((t, i) => {
+      const x = x0 + i * step;
+      const mineRows = rows.filter(s => s.team === t.id);
+      const sum = mineRows.reduce((a, s) => a + s.score, 0);
+      rr(x, y, 150, 52, 8); ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fill();
+      ctx.strokeStyle = t.col; ctx.lineWidth = 2; ctx.stroke();
+      txt(t.name, x + 75, y + 22, 20, t.col, 'center');
+      txt(sum + '  (' + mineRows.length + ')', x + 75, y + 42, 18, '#e8ebff', 'center', 500);
+    });
+  }
+
+  return { refresh, onGameOver, draw, drawTeams };
+})();
+
+/* ---------- lobby (JSONBin temporary codes for PvP) ---------- */
+let lobbyCode = '', lobbyIsHost = false, lobbyHostId = '', lobbyPlayers = [], lobbyMsg = '', lobbyMsgT = 0;
+let lobbySyncT = 0, lobbySyncing = false, lobbyPollT = 0, lobbyLastMatch = '';
+let ghosts = [];
+
+const OFFLINE_MS = 30000, MAXP = 8;
+
+const Lobby = (() => {
+  const URL = 'https://api.jsonbin.io/v3/b/6ac67438ac6210605a1cf2de';
+  const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
+  const hdr = extra => Object.assign({ 'X-Master-Key': KEY }, extra || {});
+  const myId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+  async function readRec() {
+    const r = await fetch(URL + '/latest', { headers: hdr() });
+    if (!r.ok) throw new Error('read ' + r.status);
+    return (await r.json()).record || {};
+  }
+  async function writeRec(rec) {
+    const w = await fetch(URL, {
+      method: 'PUT',
+      headers: hdr({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(rec)
+    });
+    if (!w.ok) throw new Error('write ' + w.status);
+    return rec;
+  }
+  function prune(lobbies) {
+    const now = Date.now();
+    for (const k in lobbies) {
+      const lob = lobbies[k];
+      if (!lob || now - (lob.created || 0) > 45 * 60 * 1000) { delete lobbies[k]; continue; }
+      lob.players = (lob.players || []).filter(p => now - (p.lastSeen || 0) < 60000);
+      if (!lob.players.length) delete lobbies[k];
+    }
+  }
+  function genCode() {
+    const C = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let s = '';
+    for (let i = 0; i < 5; i++) s += C[Math.floor(Math.random() * C.length)];
+    return s;
+  }
+  async function create(name, team) {
+    const rec = await readRec();
+    rec.lobbies = rec.lobbies || {};
+    prune(rec.lobbies);
+    let code;
+    do { code = genCode(); } while (rec.lobbies[code]);
+    rec.lobbies[code] = {
+      host: myId, created: Date.now(), matchId: '', started: 0,
+      players: [{ id: myId, name, team, tankId: eqT, x: WW / 2, y: WH / 2, ang: 0, hp: 100, score: 0, wave: 1, lastSeen: Date.now() }]
+    };
+    await writeRec(rec);
+    return code;
+  }
+  async function join(code, name, team) {
+    const rec = await readRec();
+    rec.lobbies = rec.lobbies || {};
+    prune(rec.lobbies);
+    const lob = rec.lobbies[code];
+    if (!lob) throw new Error('Lobby not found or expired');
+    const ex = lob.players.find(p => p.id === myId);
+    if (ex) { ex.name = name; ex.team = team; ex.tankId = eqT; ex.lastSeen = Date.now(); }
+    else {
+      if (lob.players.length >= MAXP) throw new Error('Lobby is full (8 max)');
+      lob.players.push({ id: myId, name, team, tankId: eqT, x: WW / 2, y: WH / 2, ang: 0, hp: 100, score: 0, wave: 1, lastSeen: Date.now() });
+    }
+    await writeRec(rec);
+    return lob;
+  }
+  async function pushState(stateObj) {
+    const rec = await readRec();
+    rec.lobbies = rec.lobbies || {};
+    prune(rec.lobbies);
+    const lob = rec.lobbies[lobbyCode];
+    if (!lob) throw new Error('Lobby closed');
+    let me = lob.players.find(p => p.id === myId);
+    if (!me) {
+      me = { id: myId, name: getPlayerName() || 'Player', team, tankId: eqT, lastSeen: Date.now() };
+      lob.players.push(me);
+    }
+    Object.assign(me, stateObj, { lastSeen: Date.now(), tankId: eqT, team });
+    await writeRec(rec);
+    return lob;
+  }
+  async function heartbeat() {
+    try {
+      const rec = await readRec();
+      const lob = (rec.lobbies || {})[lobbyCode];
+      if (!lob) return;
+      const me = lob.players.find(p => p.id === myId);
+      if (me) {
+        me.lastSeen = Date.now();
+        await writeRec(rec);
+      }
+    } catch (e) { console.warn('heartbeat failed', e); }
+  }
+  async function pull() {
+    const rec = await readRec();
+    const lob = (rec.lobbies || {})[lobbyCode];
+    if (!lob) throw new Error('Lobby closed');
+    return lob;
+  }
+  async function setTeam(t) {
+    const rec = await readRec();
+    const lob = (rec.lobbies || {})[lobbyCode];
+    if (!lob) return null;
+    const me = lob.players.find(p => p.id === myId);
+    if (me) { me.team = t; me.lastSeen = Date.now(); }
+    await writeRec(rec);
+    return lob;
+  }
+  async function start() {
+    const rec = await readRec();
+    const lob = (rec.lobbies || {})[lobbyCode];
+    if (!lob || lob.host !== myId) return null;
+    lob.matchId = Date.now().toString(36);
+    lob.started = Date.now();
+    for (const p of lob.players) { p.score = 0; p.wave = 1; p.hp = 100; p.lastSeen = Date.now(); }
+    await writeRec(rec);
+    return lob;
+  }
+  async function leave() {
+    try {
+      const rec = await readRec();
+      const lob = (rec.lobbies || {})[lobbyCode];
+      if (!lob) return;
+      lob.players = lob.players.filter(p => p.id !== myId);
+      if (!lob.players.length) delete rec.lobbies[lobbyCode];
+      else if (lob.host === myId) lob.host = lob.players[0].id;
+      await writeRec(rec);
+    } catch (e) { console.warn(e); }
+  }
+  return { get myId() { return myId; }, create, join, pushState, pull, setTeam, start, leave, heartbeat };
+})();
+
+function applyLobby(lob) {
+  if (!lob) return;
+  lobbyHostId = lob.host || '';
+  lobbyPlayers = (lob.players || []).map(p => Object.assign({}, p, {
+    offline: p.id === Lobby.myId ? false : Date.now() - (p.lastSeen || 0) > OFFLINE_MS
+  }));
+  lobbyIsHost = lobbyHostId === Lobby.myId;
+
+  const seen = new Set();
+  for (const p of lobbyPlayers) {
+    if (p.id === Lobby.myId) continue;
+    seen.add(p.id);
+    const t = TEAMS.find(x => x.id === p.team) || TEAMS[0];
+    let g = ghosts.find(x => x.id === p.id);
+    if (!g) {
+      g = { id: p.id, name: p.name, col: t.col, x: p.x || WW / 2, y: p.y || WH / 2, tx: p.x || WW / 2, ty: p.y || WH / 2,
+            ang: p.ang || 0, tAng: p.ang || 0, hp: p.hp || 100, score: p.score || 0, wave: p.wave || 1,
+            tankId: p.tankId || 'scout', flash: 0 };
+      ghosts.push(g);
+    } else {
+      g.tx = p.x != null ? p.x : g.tx;
+      g.ty = p.y != null ? p.y : g.ty;
+      g.tAng = p.ang != null ? p.ang : g.tAng;
+      g.name = p.name; g.col = t.col; g.hp = p.hp; g.score = p.score || 0; g.wave = p.wave || 1;
+      g.tankId = p.tankId || g.tankId;
+    }
+  }
+  ghosts = ghosts.filter(g => seen.has(g.id));
+}
+
+function pushLobbyStateNow() {
+  if (!lobbyCode) return;
+  Lobby.pushState({ x: P.x, y: P.y, ang: P.ang, hp: P.hp, score, wave })
+    .then(lob => applyLobby(lob))
+    .catch(e => console.warn(e));
+}
+
+function openLobbyScreen() {
+  state = 'lobby';
+  if (lobbyCode) pollLobby();
+}
+
+function createLobby() {
+  if (!ensureName()) return;
+  initAudio();
+  Lobby.create(getPlayerName(), team)
+    .then(code => {
+      lobbyCode = code;
+      lobbyIsHost = true;
+      lobbyHostId = Lobby.myId;
+      lobbyPlayers = [];
+      lobbyLastMatch = '';
+      state = 'lobby';
+      lobbyMsg = 'Lobby created! Share code: ' + code;
+      lobbyMsgT = 4;
+      snd(660, 0.2, 'triangle', 0.07, 400);
+      pollLobby();
+    })
+    .catch(e => {
+      lobbyMsg = 'Error: ' + e.message;
+      lobbyMsgT = 3;
+      console.error(e);
+      state = 'lobby';
+    });
+}
+
+function joinLobbyPrompt() {
+  if (!ensureName()) return;
+  initAudio();
+  let code = null;
+  try { code = prompt('Enter the lobby code from your friend:', ''); } catch (e) {}
+  if (!code) return;
+  code = String(code).toUpperCase().trim().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+  if (!code) return;
+  Lobby.join(code, getPlayerName(), team)
+    .then(lob => {
+      lobbyCode = code;
+      lobbyIsHost = lob.host === Lobby.myId;
+      lobbyHostId = lob.host;
+      lobbyLastMatch = lob.matchId || '';
+      applyLobby(lob);
+      state = 'lobby';
+      lobbyMsg = 'Joined lobby ' + code;
+      lobbyMsgT = 3;
+      snd(660, 0.2, 'triangle', 0.07, 400);
+    })
+    .catch(e => {
+      lobbyMsg = 'Error: ' + e.message;
+      lobbyMsgT = 3;
+      state = 'lobby';
+      console.error(e);
+    });
+}
+
+function leaveLobby() {
+  Lobby.leave();
+  lobbyCode = ''; lobbyIsHost = false; lobbyHostId = ''; lobbyPlayers = []; ghosts = [];
+  lobbyLastMatch = ''; lobbyMsg = ''; lobbyMsgT = 0;
+  state = 'menu';
+}
+
+function pollLobby() {
+  if (!lobbyCode) return;
+  Lobby.heartbeat()
+    .then(() => Lobby.pull())
+    .then(lob => {
+      if (lob.matchId && lob.matchId !== lobbyLastMatch) {
+        lobbyLastMatch = lob.matchId;
+        applyLobby(lob);
+        mode = 'pvp';
+        try { localStorage.setItem('holdout_mode', mode); } catch (e) {}
+        reset();
+        state = 'play';
+        banner = 'Match started!';
+        bannerT = 2;
+        lobbyMsg = '';
+        snd(880, 0.3, 'triangle', 0.08, 400);
+        return;
+      }
+      applyLobby(lob);
+    })
+    .catch(e => {
+      console.warn('poll', e);
+      lobbyMsg = 'Connection lost: ' + (e.message || 'Unknown error');
+      lobbyMsgT = 4;
+    });
+}
+
+/* ---------- loop ---------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  if (state === 'play') update(dt);
+  else if (state === 'over') { updateFx(dt); }
+  else if (state === 'menu' || state === 'store' || state === 'board' || state === 'garage' || state === 'lobby') {
+    if (Math.random() < 0.35) parts.push({ x: rnd(0, W), y: H + 5, vx: rnd(-10, 10), vy: rnd(-70, -25), t: rnd(3, 6), max: 6, col: Math.random() < 0.5 ? '#6ff2d6' : '#ffe27a', size: rnd(2, 4) });
+    for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.t -= dt; }
+    parts = parts.filter(p => p.t > 0);
+    if (lobbyMsgT > 0) lobbyMsgT -= dt;
+    if (state === 'lobby' && lobbyCode) {
+      lobbyPollT -= dt;
+      if (lobbyPollT <= 0) { lobbyPollT = 4.0; pollLobby(); }
+    }
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+Board.refresh();
+reset();
+parts = [];
+requestAnimationFrame(frame);
+})();
