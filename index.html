@@ -105,6 +105,7 @@ const BOSSES = [
   { name: 'Blinker',  col: '#e0e6ff', r: 32, hpm: 0.9,  n: 8,  k: 0.9,  charges: false, tele: 0.8 },
   { name: 'Warlord',  col: '#ff00ff', r: 52, hpm: 1.6,  n: 12, k: 0.8,  charges: true,  tele: 0.8 }
 ];
+const BOSS_EVERY = 6;
 const NOACID_TANK = 'thetank';
 const acidOn = () => upg[5] > 0 && eqT !== NOACID_TANK;
 const PICK = {
@@ -280,13 +281,13 @@ function nextWave() {
     return;
   }
 
-  const isBoss = wave % 4 === 0;
-  const bi0 = (Math.floor(wave / 4) - 1) % BOSSES.length;
+  const isBoss = wave % BOSS_EVERY === 0;
+  const bi0 = (Math.floor(wave / BOSS_EVERY) - 1) % BOSSES.length;
   banner = isBoss ? 'Wave ' + wave + ': ' + BOSSES[bi0].name : 'Wave ' + wave;
   bannerT = 2.2;
 
   if (isBoss) {
-    const bossCount = Math.max(1, Math.floor(wave / 16));
+    const bossCount = Math.max(1, Math.floor(wave / 24));
     for (let b = 0; b < bossCount; b++) {
       queue.push({ type: 'boss', bi: (bi0 + b) % BOSSES.length, at: b * 1.5 });
     }
