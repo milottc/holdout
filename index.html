@@ -93,8 +93,7 @@ const DEF = {
   tank:     { r: 19, hp: 12, sp: 42,  score: 300,  col: '#b07cff', dmg: 18 },
   spitter:  { r: 12, hp: 4,  sp: 60,  score: 200,  col: '#7be07b', dmg: 8 },
   boss:     { r: 38, hp: 0,  sp: 45,  score: 2000, col: '#ff3d81', dmg: 25 },
-  rival:    { r: 13, hp: 6,  sp: 95,  score: 150,  col: '#5cc8ff', dmg: 12 },
-  champion: { r: 22, hp: 40, sp: 75,  score: 800,  col: '#ff3d81', dmg: 20 }
+  megaBoss: { r: 55, hp: 0,  sp: 35,  score: 5000, col: '#ff00ff', dmg: 35 }
 };
 const PICK = {
   health: { col: '#6dff9c', ch: '+' },
@@ -138,6 +137,7 @@ function toggleMode() {
 let state = 'menu';
 let P, enemies, bullets, ebullets, parts, texts, pickups, rings, queue;
 let score, wave, kills, combo, comboT, waveT, interT, banner, bannerT, time, shake, flash, lastLvl, overAt = 0, newBest = false;
+let matchTimer = 0;
 let best = 0;
 try { best = +localStorage.getItem('holdout_best') || 0; } catch (e) {}
 
@@ -222,6 +222,7 @@ function reset() {
   enemies = []; bullets = []; ebullets = []; parts = []; texts = []; pickups = []; rings = []; queue = [];
   score = 0; wave = 0; kills = 0; combo = 0; comboT = 0; waveT = 0; interT = -1;
   banner = ''; bannerT = 0; time = 0; shake = 0; flash = 0; lastLvl = 1; newBest = false;
+  matchTimer = 120;
   ghosts = [];
   nextWave();
 }
@@ -260,26 +261,32 @@ function nextWave() {
   wave++;
   waveT = 0;
   queue = [];
-  const isBoss = wave % 5 === 0;
-  banner = isBoss ? 'Wave ' + wave + ': Boss' : 'Wave ' + wave;
-  bannerT = 2.2;
-
+  
   if (mode === 'pvp') {
-    banner = isBoss ? 'Wave ' + wave + ': Champion' : 'Wave ' + wave;
-    const gap = Math.max(0.35, 1.0 - wave * 0.05);
-    const n = Math.min(10, 2 + Math.floor(wave * 0.7));
-    for (let i = 0; i < n; i++) queue.push({ type: 'rival', at: i * gap });
-    if (isBoss) queue.push({ type: 'champion', at: 1.6 });
+    banner = 'Wave ' + wave;
+    bannerT = 2.2;
     return;
   }
 
-  const gap = Math.max(0.25, 0.6 - wave * 0.02);
-  if (isBoss) {
-    queue.push({ type: 'boss', at: 0 });
-    const n = Math.floor(wave * 1.2);
-    for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.7 ? 'grunt' : 'runner', at: 2.5 + i * 1.4 });
+  const isBoss = wave % 3 === 0;
+  const isMega = wave % 10 === 0;
+  banner = isMega ? 'Wave ' + wave + ': MEGA BOSS' : isBoss ? 'Wave ' + wave + ': Boss' : 'Wave ' + wave;
+  bannerT = 2.2;
+
+  if (isMega) {
+    queue.push({ type: 'megaBoss', at: 0 });
+    const n = Math.floor(wave * 2);
+    for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.6 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
+  } else if (isBoss) {
+    const bossCount = Math.max(1, Math.floor(wave / 6));
+    for (let b = 0; b < bossCount; b++) {
+      queue.push({ type: 'boss', at: b * 1.5 });
+    }
+    const n = Math.floor(wave * 1.5);
+    for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.7 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
   } else {
     const n = Math.min(40, 4 + wave * 2);
+    const gap = Math.max(0.25, 0.6 - wave * 0.02);
     for (let i = 0; i < n; i++) queue.push({ type: pickType(), at: i * gap });
   }
 }
@@ -287,7 +294,7 @@ function nextWave() {
 function spawnEnemy(type) {
   const d = DEF[type];
   let x = W / 2, y = 110;
-  if (type !== 'boss') {
+  if (type !== 'boss' && type !== 'megaBoss') {
     for (let tries = 0; tries < 8; tries++) {
       const s = Math.floor(Math.random() * 4);
       if (s === 0) { x = rnd(30, W - 30); y = 30; }
@@ -297,15 +304,14 @@ function spawnEnemy(type) {
       if (Math.hypot(x - P.x, y - P.y) > 200) break;
     }
   }
-  const isRival = type === 'rival' || type === 'champion';
-  const col = isRival ? rivalTeam.col : d.col;
-  const hp = type === 'boss' ? 70 + wave * 12
-           : type === 'champion' ? 45 + wave * 8
+  const col = d.col;
+  const hp = type === 'megaBoss' ? 250 + wave * 25
+           : type === 'boss' ? 70 + wave * 15
            : Math.ceil(d.hp * (1 + wave * 0.05));
   enemies.push({
-    type, col, boss: type === 'boss' || type === 'champion',
+    type, col, boss: type === 'boss' || type === 'megaBoss',
     x, y, r: d.r, hp, max: hp, sp: d.sp, dmg: d.dmg,
-    spawn: type === 'boss' ? 1.2 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
+    spawn: type === 'boss' ? 1.2 : type === 'megaBoss' ? 1.8 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
     ringCd: 2, aimCd: 1, chargeCd: 5, tele: 0, charge: 0, cx: 0, cy: 0, rot: 0, t: 0, dead: false,
     burn: 0, burnDps: 0, acid: 0, acidDps: 0
   });
@@ -384,6 +390,10 @@ function killEnemy(e) {
     ebullets = [];
     pickups.push({ x: e.x - 24, y: e.y, type: 'health', life: 14, dead: false });
     pickups.push({ x: e.x + 24, y: e.y, type: 'nova', life: 14, dead: false });
+    if (e.type === 'megaBoss') {
+      pickups.push({ x: e.x, y: e.y - 24, type: 'rapid', life: 14, dead: false });
+      pickups.push({ x: e.x, y: e.y + 24, type: 'shield', life: 14, dead: false });
+    }
   } else if (Math.random() < 0.11) {
     const r = Math.random();
     const type = r < 0.4 ? 'health' : r < 0.65 ? 'rapid' : r < 0.85 ? 'shield' : 'nova';
@@ -451,7 +461,7 @@ function bossAI(e, dt, nx, ny) {
   } else if (e.charge > 0) {
     e.charge -= dt;
     e.x += e.cx * 430 * dt; e.y += e.cy * 430 * dt;
-    burst(e.x, e.y, '#ff3d81', 1, 60, 0.3, 6);
+    burst(e.x, e.y, e.col || '#ff3d81', 1, 60, 0.3, 6);
   } else {
     const sp = rage ? 62 : 45;
     e.x += nx * sp * dt; e.y += ny * sp * dt;
@@ -479,26 +489,6 @@ function bossAI(e, dt, nx, ny) {
   }
   e.x = clamp(e.x, e.r, W - e.r);
   e.y = clamp(e.y, e.r, H - e.r);
-}
-
-/* ---------- pvp rivals ---------- */
-function rivalAI(e, dt, nx, ny) {
-  const big = e.type === 'champion';
-  const want = big ? 190 : 240;
-  const d = Math.hypot(P.x - e.x, P.y - e.y) || 1;
-  const m = d > want + 40 ? 1 : d < want - 40 ? -1 : 0;
-  const sp = e.sp;
-  e.x += (nx * m * sp - ny * sp * 0.75 * e.dir) * dt;
-  e.y += (ny * m * sp + nx * sp * 0.75 * e.dir) * dt;
-  e.x = clamp(e.x, e.r, W - e.r); e.y = clamp(e.y, e.r, H - e.r);
-  e.shootCd -= dt;
-  if (e.shootCd <= 0) {
-    e.shootCd = big ? rnd(0.7, 1.1) : rnd(0.9, 1.6);
-    const a = Math.atan2(P.y - e.y, P.x - e.x);
-    if (big) { for (const o of [-0.18, 0, 0.18]) eb(e.x, e.y, Math.cos(a + o) * 300, Math.sin(a + o) * 300); }
-    else eb(e.x, e.y, Math.cos(a) * 300, Math.sin(a) * 300);
-    snd(300, 0.08, 'square', 0.03, -120);
-  }
 }
 
 /* ---------- input ---------- */
@@ -549,6 +539,7 @@ addEventListener('keydown', e => {
     } else if (state === 'lobby') {
       if (k === 'escape' || k === 'b') leaveLobby();
       else if (k === 't') { cycleTeam(); Lobby.setTeam(team).then(lob => applyLobby(lob)); }
+      else if (k === 'r') { pollLobby(); lobbyMsg = 'Refreshing...'; lobbyMsgT = 1; }
       else if (k === 'enter') {
         if (lobbyIsHost) Lobby.start().then(() => pollLobby());
         else lobbyMsg = 'Only the host can start', lobbyMsgT = 2;
@@ -660,18 +651,23 @@ function update(dt) {
   P.y = clamp(P.y + P.vy * dt, 16, H - 16);
   if ((input.fire || keys['f']) && P.fireCd <= 0) fire();
 
+  /* PvP match timer */
+  if (mode === 'pvp' && state === 'play') {
+    matchTimer -= dt;
+    if (matchTimer <= 0) die();
+  }
+
   /* lobby ghost sync */
   if (lobbyCode) {
     lobbySyncT -= dt;
     if (lobbySyncT <= 0 && !lobbySyncing) {
-      lobbySyncT = 2.5;
+      lobbySyncT = 3.0;
       lobbySyncing = true;
       Lobby.pushState({ x: P.x, y: P.y, ang: P.ang, hp: P.hp, score, wave })
         .then(lob => { applyLobby(lob); })
         .catch(err => { console.warn('lobby sync', err); })
         .finally(() => { lobbySyncing = false; });
     }
-    /* smooth ghost interpolation */
     for (const g of ghosts) {
       const k = Math.min(1, dt * 3.5);
       g.x += (g.tx - g.x) * k;
@@ -710,9 +706,7 @@ function update(dt) {
 
     const dx = P.x - e.x, dy = P.y - e.y, d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d;
 
-    if (e.type === 'rival' || e.type === 'champion') {
-      rivalAI(e, dt, nx, ny);
-    } else if (e.type === 'spitter') {
+    if (e.type === 'spitter') {
       const m = d > 260 ? 1 : d < 200 ? -1 : 0;
       e.x += (nx * m * e.sp - ny * e.sp * 0.45 * e.dir) * dt;
       e.y += (ny * m * e.sp + nx * e.sp * 0.45 * e.dir) * dt;
@@ -769,6 +763,7 @@ function update(dt) {
           burst(b.x, b.y, g.col, 4, 150, 0.3, 2.5);
           floatText(g.x, g.y - 22, 'Hit!', g.col, 14);
           g.flash = 0.3;
+          score += 10;
           snd(700, 0.06, 'square', 0.03, -200);
           if (b.pierce > 0) b.pierce--; else b.dead = true;
           break;
@@ -815,17 +810,22 @@ function update(dt) {
 
   /* wave flow */
   if (state === 'play') {
-    if (interT < 0 && queue.length === 0 && enemies.length === 0) {
-      interT = 2.4;
-      P.hp = Math.min(P.max, P.hp + 12);
-      const bonus = wave * 50;
-      score += bonus;
-      banner = 'Wave ' + wave + ' cleared'; bannerT = 2;
-      floatText(P.x, P.y - 28, '+' + bonus + ' bonus', '#ffe27a', 18);
-    }
-    if (interT >= 0) {
-      interT -= dt;
-      if (interT < 0) { interT = -1; nextWave(); }
+    if (mode === 'pvp') {
+      waveT += dt;
+      if (waveT > 25) { waveT = 0; wave++; banner = 'Wave ' + wave; bannerT = 2; }
+    } else {
+      if (interT < 0 && queue.length === 0 && enemies.length === 0) {
+        interT = 2.4;
+        P.hp = Math.min(P.max, P.hp + 12);
+        const bonus = wave * 50;
+        score += bonus;
+        banner = 'Wave ' + wave + ' cleared'; bannerT = 2;
+        floatText(P.x, P.y - 28, '+' + bonus + ' bonus', '#ffe27a', 18);
+      }
+      if (interT >= 0) {
+        interT -= dt;
+        if (interT < 0) { interT = -1; nextWave(); }
+      }
     }
   }
 }
@@ -914,22 +914,14 @@ function drawEnemy(e) {
   } else if (e.type === 'spitter') {
     ctx.rotate(a); ctx.fillStyle = fill; poly(4, e.r * 1.2); ctx.fill();
     ctx.fillStyle = '#1d3a1d'; ctx.beginPath(); ctx.arc(0, 0, e.r * 0.45, 0, TAU); ctx.fill();
-  } else if (e.type === 'rival' || e.type === 'champion') {
-    ctx.rotate(a);
-    ctx.fillStyle = '#e8ebff'; ctx.fillRect(e.r * 0.5, -4, e.r * 1.5, 8);
-    ctx.fillStyle = fill;
-    if (e.type === 'champion') { poly(8, e.r * 1.1); } else { poly(5, e.r * 1.15); }
-    ctx.fill();
-    ctx.fillStyle = 'rgba(0,0,0,.35)';
-    ctx.beginPath(); ctx.arc(-e.r * 0.15, 0, e.r * 0.55, 0, TAU); ctx.fill();
   } else if (e.boss) {
     const rage = e.hp < e.max * 0.5;
     ctx.rotate(time * (rage ? 1.2 : 0.5));
     ctx.fillStyle = fill; star(10, e.r * 1.15, e.r * 0.85); ctx.fill();
-    ctx.fillStyle = rage ? '#6b0f3a' : '#3a1030';
+    ctx.fillStyle = rage ? (e.type === 'megaBoss' ? '#7a0066' : '#6b0f3a') : (e.type === 'megaBoss' ? '#3a0033' : '#3a1030');
     ctx.beginPath(); ctx.arc(0, 0, e.r * 0.6, 0, TAU); ctx.fill();
     ctx.rotate(-time * (rage ? 1.2 : 0.5));
-    ctx.fillStyle = e.tele > 0 && Math.floor(time * 20) % 2 ? '#fff' : '#ff3d81';
+    ctx.fillStyle = e.tele > 0 && Math.floor(time * 20) % 2 ? '#fff' : (e.type === 'megaBoss' ? '#ff00ff' : '#ff3d81');
     ctx.beginPath(); ctx.arc(0, 0, e.r * 0.25, 0, TAU); ctx.fill();
   }
   ctx.restore();
@@ -1082,7 +1074,7 @@ function drawHUD() {
 
   txt('Wave ' + wave, W / 2, 36, 28, '#e8ebff', 'center');
   const sub = lobbyCode ? ('Lobby ' + lobbyCode + ' · ' + teamName())
-            : mode === 'pvp' ? ('PvP · ' + teamName() + ' vs ' + rivalTeam.name)
+            : mode === 'pvp' ? ('PvP · ' + teamName())
             : ('Survival · ' + teamName());
   txt(sub, W / 2, 58, 16, lobbyCode ? '#6ff2d6' : mode === 'pvp' ? teamCol() : '#9aa0d6', 'center', 500);
 
@@ -1095,7 +1087,6 @@ function drawHUD() {
     ctx.fillRect(W - 20 - 100 * (comboT / 2.5), 88, 100 * (comboT / 2.5), 3);
   }
   if (lobbyCode) {
-    /* lobby mini scoreboard on the right */
     let y = 118;
     txt('— Lobby —', W - 20, y, 15, '#6ff2d6', 'right', 500); y += 18;
     const rows = [...lobbyPlayers].sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -1108,12 +1099,24 @@ function drawHUD() {
     });
   }
 
-  const bs = enemies.find(e => e.boss && !e.dead);
-  if (bs && bs.spawn <= 0) {
-    txt(bs.type === 'champion' ? 'Champion' : 'Boss', W / 2, H - 44, 16, bs.col || '#ff3d81', 'center');
-    rr((W - 420) / 2, H - 36, 420, 12, 6); ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fill();
-    rr((W - 420) / 2, H - 36, Math.max(8, 420 * bs.hp / bs.max), 12, 6); ctx.fillStyle = bs.col || '#ff3d81'; ctx.fill();
+  /* Boss bar (supports multiple bosses) */
+  const bosses = enemies.filter(e => e.boss && !e.dead && e.spawn <= 0);
+  if (bosses.length > 0) {
+    txt(bosses.length > 1 ? 'Bosses x' + bosses.length : 'Boss', W / 2, H - 44, 16, '#ff3d81', 'center');
+    const barW = 420 / bosses.length;
+    bosses.forEach((bs, i) => {
+      rr((W - 420) / 2 + i * barW, H - 36, barW - 4, 12, 6); ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fill();
+      rr((W - 420) / 2 + i * barW, H - 36, Math.max(8, (barW - 4) * bs.hp / bs.max), 12, 6); ctx.fillStyle = bs.col || '#ff3d81'; ctx.fill();
+    });
   }
+
+  /* PvP match timer */
+  if (mode === 'pvp' && state === 'play') {
+    const mins = Math.floor(matchTimer / 60);
+    const secs = Math.floor(matchTimer % 60).toString().padStart(2, '0');
+    txt(mins + ':' + secs, W / 2, 90, 32, matchTimer < 20 ? '#ff4d6d' : '#ffe27a', 'center');
+  }
+
   if (bannerT > 0) {
     ctx.globalAlpha = clamp(bannerT / 0.6, 0, 1);
     txt(banner, W / 2, H * 0.3, 58, '#e8ebff', 'center');
@@ -1186,7 +1189,6 @@ function drawOver() {
     ctx.globalAlpha = 1;
   }
   if (lobbyCode) {
-    /* final lobby scores */
     const rows = [...lobbyPlayers].sort((a, b) => (b.score || 0) - (a.score || 0));
     txt('— Lobby scores —', W / 2, 452, 22, '#6ff2d6', 'center');
     rows.slice(0, 6).forEach((p, i) => {
@@ -1308,7 +1310,6 @@ function drawLobby() {
   txt('PvP Lobby', W / 2, 72, 56, '#6ff2d6', 'center');
 
   if (!lobbyCode) {
-    /* not in a lobby yet */
     txt('Temporary codes · 2 or more players', W / 2, 130, 24, '#9aa0d6', 'center', 500);
 
     rr(280, 200, 400, 80, 12); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
@@ -1329,7 +1330,6 @@ function drawLobby() {
     return;
   }
 
-  /* in a lobby */
   txt('Code: ' + lobbyCode, W / 2, 118, 40, '#ffe27a', 'center');
   txt('Share this code with 2+ friends · ' + lobbyPlayers.length + '/8 players', W / 2, 146, 18, '#9aa0d6', 'center', 500);
 
@@ -1359,6 +1359,9 @@ function drawLobby() {
   }
 
   navBtn(20, 'Leave (Esc)');
+  rr(680, 20, 170, 36, 8); ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fill();
+  ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
+  txt('Refresh (R)', 765, 43, 18, '#6ff2d6', 'center');
   txt('T to change team · the host starts the match for everyone', W / 2, 600, 18, '#9aa0d6', 'center', 500);
 
   if (lobbyMsgT > 0) {
@@ -1369,6 +1372,7 @@ function drawLobby() {
 }
 function lobbyClick(p) {
   if (p.x > 20 && p.x < 130 && p.y < 64) { leaveLobby(); return; }
+  if (p.x > 680 && p.x < 850 && p.y > 20 && p.y < 60) { pollLobby(); lobbyMsg = 'Refreshing...'; lobbyMsgT = 1; return; }
   if (!lobbyCode) {
     if (p.x > 280 && p.x < 680 && p.y > 200 && p.y < 280) { createLobby(); return; }
     if (p.x > 280 && p.x < 680 && p.y > 310 && p.y < 390) { joinLobbyPrompt(); return; }
@@ -1540,7 +1544,7 @@ const Lobby = (() => {
   const URL = 'https://api.jsonbin.io/v3/b/6ac67438ac6210605a1cf2de';
   const KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
   const hdr = extra => Object.assign({ 'X-Master-Key': KEY }, extra || {});
-  const OFFLINE_MS = 20000, MAXP = 8;
+  const OFFLINE_MS = 30000, MAXP = 8;
   const myId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
   async function readRec() {
@@ -1615,6 +1619,18 @@ const Lobby = (() => {
     await writeRec(rec);
     return lob;
   }
+  async function heartbeat() {
+    try {
+      const rec = await readRec();
+      const lob = (rec.lobbies || {})[lobbyCode];
+      if (!lob) return;
+      const me = lob.players.find(p => p.id === myId);
+      if (me) {
+        me.lastSeen = Date.now();
+        await writeRec(rec);
+      }
+    } catch (e) { console.warn('heartbeat failed', e); }
+  }
   async function pull() {
     const rec = await readRec();
     const lob = (rec.lobbies || {})[lobbyCode];
@@ -1651,18 +1667,17 @@ const Lobby = (() => {
       await writeRec(rec);
     } catch (e) { console.warn(e); }
   }
-  return { get myId() { return myId; }, create, join, pushState, pull, setTeam, start, leave };
+  return { get myId() { return myId; }, create, join, pushState, pull, setTeam, start, leave, heartbeat };
 })();
 
 function applyLobby(lob) {
   if (!lob) return;
   lobbyHostId = lob.host || '';
   lobbyPlayers = (lob.players || []).map(p => Object.assign({}, p, {
-    offline: Date.now() - (p.lastSeen || 0) > 20000
+    offline: p.id === Lobby.myId ? false : Date.now() - (p.lastSeen || 0) > OFFLINE_MS
   }));
   lobbyIsHost = lobbyHostId === Lobby.myId;
 
-  /* update ghosts from other players */
   const seen = new Set();
   for (const p of lobbyPlayers) {
     if (p.id === Lobby.myId) continue;
@@ -1758,13 +1773,12 @@ function leaveLobby() {
 
 function pollLobby() {
   if (!lobbyCode) return;
-  Lobby.pull()
+  Lobby.heartbeat()
+    .then(() => Lobby.pull())
     .then(lob => {
-      /* did the host start a new match? */
       if (lob.matchId && lob.matchId !== lobbyLastMatch) {
         lobbyLastMatch = lob.matchId;
         applyLobby(lob);
-        /* start playing in pvp mode */
         mode = 'pvp';
         try { localStorage.setItem('holdout_mode', mode); } catch (e) {}
         reset();
@@ -1779,8 +1793,8 @@ function pollLobby() {
     })
     .catch(e => {
       console.warn('poll', e);
-      lobbyMsg = 'Lobby connection lost';
-      lobbyMsgT = 3;
+      lobbyMsg = 'Connection lost: ' + (e.message || 'Unknown error');
+      lobbyMsgT = 4;
     });
 }
 
@@ -1798,7 +1812,7 @@ function frame(now) {
     if (lobbyMsgT > 0) lobbyMsgT -= dt;
     if (state === 'lobby' && lobbyCode) {
       lobbyPollT -= dt;
-      if (lobbyPollT <= 0) { lobbyPollT = 2.2; pollLobby(); }
+      if (lobbyPollT <= 0) { lobbyPollT = 4.0; pollLobby(); }
     }
   }
   draw();
