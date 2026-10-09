@@ -159,11 +159,11 @@ const aim = { x: W * 0.75, y: H / 2 };
 const input = { fire: false };
 const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
 let aimId = null;
-let credits = 0, upg = [0, 0, 0, 0, 0, 0], earned = 0;
+let credits = 0, upg = [0, 0, 0, 0, 0, 0, 0], earned = 0;
 try {
   credits = +localStorage.getItem('holdout_credits') || 0;
   const u = JSON.parse(localStorage.getItem('holdout_upg'));
-  if (Array.isArray(u)) upg = [0, 1, 2, 3, 4, 5].map(i => clamp(u[i] | 0, 0, 5));
+  if (Array.isArray(u)) upg = [0, 1, 2, 3, 4, 5, 6].map(i => clamp(u[i] | 0, 0, 5));
 } catch (e) {}
 const UPG = [
   { name: 'Armor',        desc: '+10 max health',              base: 100 },
@@ -171,7 +171,8 @@ const UPG = [
   { name: 'Trigger',      desc: '+5% fire rate',               base: 150 },
   { name: 'Dash drive',   desc: '-7% dash cooldown',           base: 120 },
   { name: 'Flamethrower', desc: 'Rounds ignite: +1 burn dmg/s', base: 260 },
-  { name: 'Acid rounds',  desc: '+1 acid dmg/s, not on The Tank', base: 260 }
+  { name: 'Acid rounds',  desc: '+1 acid dmg/s, not on The Tank', base: 260 },
+  { name: 'Freeze ray',   desc: 'Rounds freeze: -12% enemy speed per level', base: 260 }
 ];
 const MAXUPG = 5;
 const upgCost = i => UPG[i].base * (upg[i] + 1);
@@ -225,7 +226,7 @@ function storeClick(p) {
   if (p.x > 20 && p.x < 130 && p.y < 64) { state = 'menu'; return; }
   if (p.y < 64 && p.x > 300 && p.x < 410) { storeTab = 0; return; }
   if (p.y < 64 && p.x > 420 && p.x < 530) { storeTab = 1; return; }
-  if (storeTab === 0) { for (let i = 0; i < UPG.length; i++) if (p.x > 230 && p.x < 730 && p.y > 150 + i * 66 && p.y < 208 + i * 66) buy(i); }
+  if (storeTab === 0) { for (let i = 0; i < UPG.length; i++) if (p.x > 230 && p.x < 730 && p.y > 150 + i * 60 && p.y < 202 + i * 60) buy(i); }
   else for (let i = 0; i < TANKS.length; i++) if (p.x > 200 && p.x < 760 && p.y > 150 + i * 66 && p.y < 210 + i * 66) buyTank(i);
 }
 
@@ -261,7 +262,7 @@ function pickType() {
     grunt: 10,
     runner: wave >= 2 ? 4 + wave * 0.5 : 0,
     spitter: wave >= 3 ? 2 + wave * 0.4 : 0,
-    tank: wave >= 4 ? 1 + wave * 0.3 : 0
+    tank: wave >= 3 ? 1.5 + wave * 0.4 : 0
   };
   let tot = 0;
   for (const k in w) tot += w[k];
@@ -294,7 +295,7 @@ function nextWave() {
     const n = Math.floor(wave * 1.5);
     for (let i = 0; i < n; i++) queue.push({ type: Math.random() < 0.7 ? 'grunt' : 'runner', at: 3.0 + i * 1.2 });
   } else {
-    const n = Math.min(40, 4 + wave * 2);
+    const n = Math.min(50, Math.floor(5 + wave * 2.5));
     const gap = Math.max(0.25, 0.6 - wave * 0.02);
     for (let i = 0; i < n; i++) queue.push({ type: pickType(), at: i * gap });
   }
@@ -315,14 +316,14 @@ function spawnEnemy(type, bi) {
     }
   }
   const col = B ? B.col : d.col;
-  const hp = B ? Math.ceil((70 + wave * 15) * B.hpm)
-           : Math.ceil(d.hp * (1 + wave * 0.05));
+  const hp = B ? Math.ceil((110 + wave * 22) * B.hpm)
+           : Math.ceil(d.hp * 1.4 * (1 + wave * 0.08));
   enemies.push({
     type, col, boss: !!B, bi: bi || 0, bname: B ? B.name : '', bt: 0, bt2: 0,
-    x, y, r: B ? B.r : d.r, hp, max: hp, sp: d.sp, dmg: d.dmg,
+    x, y, r: B ? B.r : d.r, hp, max: hp, sp: B ? d.sp : d.sp * Math.min(1.35, 1 + wave * 0.015), dmg: Math.round(d.dmg * 1.3),
     spawn: B ? 1.2 : 0.7, flash: 0, shootCd: rnd(1, 2.5), dir: Math.random() < 0.5 ? -1 : 1,
     ringCd: 2, aimCd: 1, chargeCd: B && B.charges ? (B.name === 'Charger' ? 2.5 : 5) : 99999, tele: 0, charge: 0, cx: 0, cy: 0, rot: 0, t: 0, dead: false,
-    burn: 0, burnDps: 0, acid: 0, acidDps: 0
+    burn: 0, burnDps: 0, acid: 0, acidDps: 0, freeze: 0, fz: 0
   });
 }
 
@@ -344,7 +345,7 @@ function eb(x, y, vx, vy) {
 /* ---------- combat ---------- */
 function fire() {
   const a = P.ang, lvl = weaponLevel(), sp = 620;
-  const burn = upg[4], acid = acidOn() ? upg[5] : 0;
+  const burn = upg[4], acid = acidOn() ? upg[5] : 0, freeze = upg[6];
   const add = (off, lat) => {
     const aa = a + off;
     bullets.push({
@@ -352,7 +353,7 @@ function fire() {
       y: P.y + Math.sin(a) * 16 + Math.cos(a) * lat,
       vx: Math.cos(aa) * sp, vy: Math.sin(aa) * sp,
       life: 1.1, pierce: lvl >= 5 ? 2 : 0, hits: [], r: 3, dead: false,
-      burn, acid
+      burn, acid, freeze
     });
   };
   if (lvl === 1) add(0, 0);
@@ -628,7 +629,7 @@ addEventListener('keydown', e => {
       else if (k === 'j') joinLobbyPrompt();
     } else if (state === 'store') {
       if (k === 't') storeTab = 1 - storeTab;
-      else if (k >= '1' && k <= '6') { if (storeTab === 1) buyTank(+k - 1); else buy(+k - 1); }
+      else if (k >= '1' && k <= '7') { if (storeTab === 1) buyTank(+k - 1); else buy(+k - 1); }
       else if (k === 'b' || k === 'escape') state = 'menu';
     } else if (state === 'board') {
       if (k === 'b' || k === 'escape' || k === 'l') state = 'menu';
@@ -804,18 +805,20 @@ function update(dt) {
     }
 
     const dx = P.x - e.x, dy = P.y - e.y, d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d;
+    const edt = e.freeze > 0 ? dt * (1 - Math.min(0.7, e.fz) * (e.boss ? 0.6 : 1)) : dt;
+    if (e.freeze > 0) { e.freeze -= dt; if (e.freeze <= 0) e.fz = 0; }
 
     if (e.type === 'spitter') {
       const m = d > 260 ? 1 : d < 200 ? -1 : 0;
-      e.x += (nx * m * e.sp - ny * e.sp * 0.45 * e.dir) * dt;
-      e.y += (ny * m * e.sp + nx * e.sp * 0.45 * e.dir) * dt;
+      e.x += (nx * m * e.sp - ny * e.sp * 0.45 * e.dir) * edt;
+      e.y += (ny * m * e.sp + nx * e.sp * 0.45 * e.dir) * edt;
       e.x = clamp(e.x, 12, W - 12); e.y = clamp(e.y, 12, H - 12);
-      e.shootCd -= dt;
+      e.shootCd -= edt;
       if (e.shootCd <= 0) { e.shootCd = 2.2; eb(e.x, e.y, nx * 230, ny * 230); snd(260, 0.1, 'square', 0.03, -100); }
     } else if (e.boss) {
-      bossAI(e, dt, nx, ny);
+      bossAI(e, edt, nx, ny);
     } else {
-      e.x += nx * e.sp * dt; e.y += ny * e.sp * dt;
+      e.x += nx * e.sp * edt; e.y += ny * e.sp * edt;
     }
     if (d < e.r + P.r) hurt(e.dmg, e.x, e.y);
   }
@@ -842,11 +845,12 @@ function update(dt) {
       if (e.dead || e.spawn > 0 || b.hits.includes(e)) continue;
       if (Math.hypot(b.x - e.x, b.y - e.y) < e.r + b.r) {
         b.hits.push(e);
-        burst(b.x, b.y, b.burn ? '#ff9f43' : b.acid ? '#9cff57' : '#ffe27a', 3, 130, 0.25, 2);
+        burst(b.x, b.y, b.burn ? '#ff9f43' : b.acid ? '#9cff57' : b.freeze ? '#7fe7ff' : '#ffe27a', 3, 130, 0.25, 2);
         hitEnemy(e, 1);
         if (!e.dead) {
           if (b.burn) { e.burn = Math.max(e.burn, 2.5); e.burnDps = Math.max(e.burnDps, b.burn); }
           if (b.acid) { e.acid = Math.max(e.acid, 4); e.acidDps = Math.max(e.acidDps, b.acid); }
+          if (b.freeze) { e.freeze = Math.max(e.freeze, 2.5); e.fz = Math.max(e.fz, 0.12 * b.freeze); }
         }
         snd(240, 0.04, 'triangle', 0.02);
         if (b.pierce > 0) b.pierce--; else b.dead = true;
@@ -876,7 +880,7 @@ function update(dt) {
     if (b.life <= 0 || b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) { b.dead = true; continue; }
     if (Math.hypot(b.x - P.x, b.y - P.y) < P.r + 5) {
       const was = P.inv <= 0 && P.dashT <= 0;
-      hurt(8, b.x, b.y);
+      hurt(11, b.x, b.y);
       if (was || P.shield > 0) b.dead = true;
     }
   }
@@ -1035,6 +1039,13 @@ function drawEnemy(e) {
     ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 5, 0, TAU); ctx.stroke();
     ctx.globalAlpha = 1;
   }
+  if (e.freeze > 0) {
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = '#7fe7ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 4, 0, TAU); ctx.stroke();
+    ctx.fillStyle = 'rgba(127,231,255,.18)'; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
   if (!e.boss && e.hp < e.max) {
     ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(e.x - 14, e.y - e.r - 9, 28, 4);
     ctx.fillStyle = col; ctx.fillRect(e.x - 14, e.y - e.r - 9, 28 * e.hp / e.max, 4);
@@ -1104,7 +1115,7 @@ function drawWorld() {
 
   ctx.lineCap = 'round'; ctx.lineWidth = 3;
   for (const b of bullets) {
-    ctx.strokeStyle = b.burn ? '#ff9f43' : b.acid ? '#9cff57' : '#ffe27a';
+    ctx.strokeStyle = b.burn ? '#ff9f43' : b.acid ? '#9cff57' : b.freeze ? '#7fe7ff' : '#ffe27a';
     ctx.beginPath();
     ctx.moveTo(b.x, b.y);
     ctx.lineTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03);
@@ -1168,7 +1179,8 @@ function drawHUD() {
   if (P.rapid > 0) { txt('Rapid fire ' + P.rapid.toFixed(1) + 's', 20, ty, 16, '#ffe27a'); ty += 20; }
   if (P.shield > 0) { txt('Shield ' + P.shield.toFixed(1) + 's', 20, ty, 16, '#5cc8ff'); ty += 20; }
   if (upg[4] > 0) { txt('Flamethrower ' + upg[4], 20, ty, 16, '#ff9f43'); ty += 20; }
-  if (acidOn()) { txt('Acid rounds ' + upg[5], 20, ty, 16, '#9cff57'); }
+  if (acidOn()) { txt('Acid rounds ' + upg[5], 20, ty, 16, '#9cff57'); ty += 20; }
+  if (upg[6] > 0) { txt('Freeze ray ' + upg[6], 20, ty, 16, '#7fe7ff'); }
 
   txt('Wave ' + wave, W / 2, 36, 28, '#e8ebff', 'center');
   const sub = lobbyCode ? ('Lobby ' + lobbyCode + ' · ' + teamName())
@@ -1334,22 +1346,22 @@ function drawStore() {
   ctx.fillStyle = '#6ff2d6'; ctx.fillRect(300 + storeTab * 120, 60, 110, 3);
   if (storeTab === 1) { drawTankShop(); return; }
   UPG.forEach((u, i) => {
-    const y = 150 + i * 66, maxed = upg[i] >= MAXUPG, ok = !maxed && credits >= upgCost(i);
-    const isFire = i === 4, isAcid = i === 5;
-    const accent = isFire ? '#ff9f43' : isAcid ? '#9cff57' : '#6ff2d6';
-    rr(230, y, 500, 58, 10); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
+    const y = 150 + i * 60, maxed = upg[i] >= MAXUPG, ok = !maxed && credits >= upgCost(i);
+    const isFire = i === 4, isAcid = i === 5, isFz = i === 6;
+    const accent = isFire ? '#ff9f43' : isAcid ? '#9cff57' : isFz ? '#7fe7ff' : '#6ff2d6';
+    rr(230, y, 500, 52, 10); ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
     ctx.strokeStyle = maxed ? 'rgba(255,226,122,.6)' : ok ? accent : 'rgba(255,255,255,.15)';
     ctx.lineWidth = 2; ctx.stroke();
-    txt((i + 1) + '  ' + u.name, 250, y + 25, 24, isFire ? '#ff9f43' : isAcid ? '#9cff57' : '#e8ebff');
-    txt(u.desc, 250, y + 47, 16, '#9aa0d6', 'left', 500);
+    txt((i + 1) + '  ' + u.name, 250, y + 23, 22, isFire ? '#ff9f43' : isAcid ? '#9cff57' : isFz ? '#7fe7ff' : '#e8ebff');
+    txt(u.desc, 250, y + 43, 15, '#9aa0d6', 'left', 500);
     for (let k = 0; k < MAXUPG; k++) {
-      rr(524 + k * 17, y + 12, 13, 8, 2);
+      rr(524 + k * 17, y + 10, 13, 8, 2);
       ctx.fillStyle = k < upg[i] ? '#ffe27a' : 'rgba(255,255,255,.15)'; ctx.fill();
     }
-    txt(maxed ? 'Maxed' : upgCost(i) + ' credits', 712, y + 46, 20, maxed ? '#9aa0d6' : ok ? '#ffe27a' : '#ff6b6b', 'right');
+    txt(maxed ? 'Maxed' : upgCost(i) + ' credits', 712, y + 42, 20, maxed ? '#9aa0d6' : ok ? '#ffe27a' : '#ff6b6b', 'right');
   });
-  txt('Press 1-6 or tap an item to buy', W / 2, 572, 20, '#9aa0d6', 'center', 500);
-  txt('Credits are earned each run and saved on this device', W / 2, 598, 18, '#9aa0d6', 'center', 500);
+  txt('Press 1-7 or tap an item to buy', W / 2, 594, 20, '#9aa0d6', 'center', 500);
+  txt('Credits are earned each run and saved on this device', W / 2, 618, 18, '#9aa0d6', 'center', 500);
 }
 function drawTankShape(t, r) {
   const k = r / t.r;
