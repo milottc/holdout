@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Holdout</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0c1c;--fg:#e8ebff;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0a0c1c;--fg:#e8ebff}}
+:root[data-theme="dark"]{--bg:#0a0c1c;--fg:#e8ebff}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+body{
+  height:100%;margin:0;background:var(--bg);color:var(--fg);
+  display:flex;align-items:center;justify-content:center;overflow:hidden;
+  font-family:"Barlow Condensed","Arial Narrow",Arial,sans-serif;
+  -webkit-user-select:none;user-select:none;
+}
+canvas{display:block;touch-action:none;cursor:crosshair;border-radius:6px}
+#dash{
+  display:none;position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom,0px));
+  width:72px;height:72px;border-radius:50%;border:2px solid #6ff2d6;background:rgba(111,242,214,.14);
+  color:#6ff2d6;font:700 18px "Barlow Condensed",Arial,sans-serif;touch-action:none;
+}
+@media (pointer:coarse){#dash{display:block}canvas{cursor:default}}
+</style>
+</head>
+<body>
+<canvas id="g" aria-label="Holdout survival shooter"></canvas>
+<button id="dash" type="button">Dash</button>
+<script>
+</script>
+</body>
+</html>
