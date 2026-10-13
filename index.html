@@ -350,115 +350,67 @@ function claimDailyLogin(){
 }
 loadDaily();
 
-/* ================= JSONBIN BACKEND =================
-   Shared bin used for both lobbies and the leaderboard.
-   Requires a JSONBin.io Master Key — asked once, saved locally.
-   ==================================================== */
-const JSONBIN = (() => {
-  const MK_KEY = 'holdout_jsonbin_key';
-  const BIN_KEY = 'holdout_jsonbin_bin';
-  let masterKey = '';
-  let binId = '';
-  try { masterKey = localStorage.getItem(MK_KEY) || ''; } catch(e){}
-  try { binId = localStorage.getItem(BIN_KEY) || ''; } catch(e){}
+/* ================= CLOUD (JSONBin — hardcoded) ================= */
+const JSONBIN_ID  = '6ac67438ac6210605a1cf2de';
+const JSONBIN_KEY = '$2a$10$yM6HPmcx6ymMTcCceJ5cteVEZ9BNO54KfB9Kui4In.rfOqC3epo66';
+const JSONBIN_URL = 'https://api.jsonbin.io/v3/b/' + JSONBIN_ID;
 
-  const API = 'https://api.jsonbin.io/v3/b';
+const Cloud = (() => {
+  let cache = null;
+  let lastReadT = 0;
+  const CACHE_MS = 1200;
+  let writesInFlight = false;
 
-  function headers(extra){
-    return Object.assign({
-      'X-Master-Key': masterKey,
+  function headers(){
+    return {
+      'X-Master-Key': JSONBIN_KEY,
       'Content-Type': 'application/json'
-    }, extra || {});
+    };
   }
-  function hasKey(){ return !!masterKey; }
-  async function ensureSetup(silent){
-    if(!masterKey){
-      if(silent) throw new Error('No JSONBin key set');
-      let k = null;
-      try { k = prompt(
-        'Paste your JSONBin.io Master Key (free at jsonbin.io → API Keys).\n' +
-        'It is saved only on this device.',
-        '');
-      } catch(e){}
-      if(!k) throw new Error('No master key provided');
-      masterKey = String(k).trim();
-      try { localStorage.setItem(MK_KEY, masterKey); } catch(e){}
-    }
-    if(!binId){
-      const r = await fetch(API, {
-        method:'POST',
-        headers: headers({ 'X-Bin-Name':'holdout', 'X-Bin-Private':'false' }),
-        body: JSON.stringify({ lobbies: {}, scores: [] })
-      });
-      if(!r.ok){
-        const errTxt = await r.text().catch(()=> '');
-        throw new Error('Create bin failed: ' + r.status + ' ' + errTxt);
-      }
-      const j = await r.json();
-      binId = (j && j.metadata && j.metadata.id) || '';
-      if(!binId) throw new Error('No bin id returned');
-      try { localStorage.setItem(BIN_KEY, binId); } catch(e){}
-    }
-    return { masterKey: masterKey, binId: binId };
-  }
-  async function readAll(silent){
-    await ensureSetup(silent);
-    const r = await fetch(API + '/' + binId + '/latest', { headers: headers() });
-    if(!r.ok){
-      const t = await r.text().catch(()=> '');
-      // If the bin was deleted, clear id so we recreate on next call
-      if(r.status === 404){
-        binId = ''; try { localStorage.removeItem(BIN_KEY); } catch(e){}
-        throw new Error('Bin missing (will recreate)');
-      }
-      throw new Error('Read ' + r.status + ' ' + t);
-    }
+  async function readAll(force){
+    const now = Date.now();
+    if(!force && cache && (now - lastReadT) < CACHE_MS) return cache;
+    const r = await fetch(JSONBIN_URL + '/latest', { headers: headers() });
+    if(!r.ok) throw new Error('read ' + r.status);
     const j = await r.json();
     const rec = (j && j.record) ? j.record : {};
-    if(!rec.lobbies) rec.lobbies = {};
     if(!Array.isArray(rec.scores)) rec.scores = [];
+    if(!rec.lobbies || typeof rec.lobbies !== 'object') rec.lobbies = {};
+    cache = rec;
+    lastReadT = now;
     return rec;
   }
-  async function writeAll(rec, silent){
-    await ensureSetup(silent);
-    const r = await fetch(API + '/' + binId, {
+  async function writeAll(rec){
+    const r = await fetch(JSONBIN_URL, {
       method:'PUT',
       headers: headers(),
       body: JSON.stringify(rec)
     });
-    if(!r.ok){
-      const t = await r.text().catch(()=> '');
-      throw new Error('Write ' + r.status + ' ' + t);
-    }
+    if(!r.ok) throw new Error('write ' + r.status);
+    cache = rec;
+    lastReadT = Date.now();
     return rec;
   }
-  function resetKeys(){
-    try { localStorage.removeItem(MK_KEY); localStorage.removeItem(BIN_KEY); } catch(e){}
-    masterKey = ''; binId = '';
+  async function update(mutator){
+    // read-modify-write: always fresh read so nothing is lost
+    const rec = await readAll(true);
+    const result = await mutator(rec);
+    await writeAll(rec);
+    return result;
   }
-  function setKey(k){
-    masterKey = String(k || '').trim();
-    try { localStorage.setItem(MK_KEY, masterKey); } catch(e){}
-  }
-  return {
-    ensureSetup, readAll, writeAll, resetKeys, setKey,
-    hasKey: hasKey,
-    get binId(){ return binId; },
-    get masterKey(){ return masterKey; }
-  };
+  return { readAll, writeAll, update, get lastError(){ return ''; } };
 })();
 
 /* ================= LEADERBOARD (cloud + local cache) ================= */
 const Board = (() => {
-  const KEY = 'holdout_scores';
+  const KEY = 'holdout_scores_cache';
   const MAX = 100;
-  let local = [];
+  let cache = [];
   let mine = null;
   let lastName = getPlayerName();
-  let status = 'local';        // 'local' | 'syncing' | 'online' | 'error'
+  let status = 'idle';     // 'idle' | 'syncing' | 'online' | 'error'
   let lastError = '';
-  let lastSync = 0;
-  let syncInFlight = false;
+  let inFlight = false;
 
   function clean(a){
     if(!Array.isArray(a)) return [];
@@ -470,8 +422,7 @@ const Board = (() => {
         mode:s.mode === 'pvp' ? 'pvp' : 'surv',
         score:Math.floor(s.score),
         wave:s.wave | 0,
-        kills:s.kills | 0,
-        ts:s.ts || 0
+        kills:s.kills | 0
       }));
   }
   function merge(...lists){
@@ -482,50 +433,44 @@ const Board = (() => {
     }
     return out.slice(0, MAX);
   }
+  function loadLocal(){
+    try { cache = clean(JSON.parse(localStorage.getItem(KEY) || '[]')); } catch(e){ cache = []; }
+  }
   function saveLocal(){
-    try { localStorage.setItem(KEY, JSON.stringify(local)); } catch(e){}
+    try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch(e){}
   }
-  function refresh(){
-    // local cache only, synchronous
-    try { local = clean(JSON.parse(localStorage.getItem(KEY) || '[]')); } catch(e){ local = []; }
-  }
+  function refresh(){ loadLocal(); }
+
   async function syncCloud(){
-    if(!JSONBIN.hasKey()){ status = 'local'; return; }
-    if(syncInFlight) return;
-    syncInFlight = true;
+    if(inFlight) return;
+    inFlight = true;
     status = 'syncing';
     try {
-      const rec = await JSONBIN.readAll(true);
+      const rec = await Cloud.readAll(true);
       const cloud = clean(rec.scores || []);
-      local = merge(local, cloud);
+      cache = merge(cache, cloud);
       saveLocal();
       status = 'online';
-      lastSync = Date.now();
       lastError = '';
     } catch(e){
       status = 'error';
       lastError = e.message || 'unknown';
-      console.warn('Board sync failed', e);
     } finally {
-      syncInFlight = false;
+      inFlight = false;
     }
   }
+
   async function submit(entry){
-    // Always update local first (instant)
-    local = merge(local, [entry]);
+    // instant local commit so the player sees their score right away
+    cache = merge(cache, [entry]);
     saveLocal();
-    if(!JSONBIN.hasKey()){ status = 'local'; return; }
     status = 'syncing';
     try {
-      const rec = await JSONBIN.readAll(true);
-      const cloud = clean(rec.scores || []);
-      rec.scores = merge(cloud, [entry]).slice(0, MAX);
-      await JSONBIN.writeAll(rec, true);
-      // update local cache with the merged result
-      local = merge(local, rec.scores);
-      saveLocal();
+      await Cloud.update(rec => {
+        const cloud = clean(rec.scores || []);
+        rec.scores = merge(cloud, [entry]).slice(0, MAX);
+      });
       status = 'online';
-      lastSync = Date.now();
       lastError = '';
     } catch(e){
       status = 'error';
@@ -533,6 +478,7 @@ const Board = (() => {
       console.warn('Board submit failed', e);
     }
   }
+
   function onGameOver(sc, wv, kl){
     if(sc <= 0) return;
     if(!lastName) lastName = getPlayerName() || 'Player';
@@ -540,24 +486,25 @@ const Board = (() => {
     const entry = {
       id:mine, name:lastName, team:team,
       mode:mode === 'pvp' ? 'pvp' : 'surv',
-      score:sc, wave:wv, kills:kl, ts:Date.now()
+      score:sc, wave:wv, kills:kl
     };
     submit(entry);
   }
-  function list(){ return merge(local); }
-  function count(){ return local.length; }
+
+  function list(){ return merge(cache); }
+  function count(){ return cache.length; }
+
   function draw(y, n){
     const rows = list().slice(0, n);
     const cx = W / 2;
     txt('Leaderboard', cx - 200, y, 20, '#6ff2d6', 'left');
-    // status
-    let statusTxt = 'Local only';
-    let statusCol = '#9aa0d6';
-    if(status === 'online'){ statusTxt = 'Cloud · online'; statusCol = '#6dff9c'; }
-    else if(status === 'syncing'){ statusTxt = 'Cloud · syncing…'; statusCol = '#ffe27a'; }
-    else if(status === 'error'){ statusTxt = 'Cloud error'; statusCol = '#ff6b6b'; }
-    else if(JSONBIN.hasKey()){ statusTxt = 'Cloud · idle'; statusCol = '#9aa0d6'; }
-    txt(statusTxt, cx + 200, y, 14, statusCol, 'right', 500);
+    let st = 'Local cache';
+    let sc = '#9aa0d6';
+    if(status === 'online'){ st = 'Cloud · online'; sc = '#6dff9c'; }
+    else if(status === 'syncing'){ st = 'Cloud · syncing…'; sc = '#ffe27a'; }
+    else if(status === 'error'){ st = 'Cloud · error'; sc = '#ff6b6b'; }
+    else { st = 'Cloud · idle'; sc = '#9aa0d6'; }
+    txt(st, cx + 200, y, 14, sc, 'right', 500);
     if(!rows.length){
       txt('No scores yet — play a game to set one!', cx, y + 24, 18, '#9aa0d6', 'center', 500);
       return;
@@ -581,7 +528,7 @@ const Board = (() => {
 })();
 Board.refresh();
 
-/* ================= LOBBY (JSONBin — shares bin with board) ================= */
+/* ================= LOBBY (JSONBin) ================= */
 const Lobby = (() => {
   const myId = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   let code = '';
@@ -606,70 +553,75 @@ const Lobby = (() => {
     }
   }
   async function create(name, tm){
-    const rec = await JSONBIN.readAll();
-    prune(rec);
-    let c;
-    do { c = genCode(); } while(rec.lobbies[c]);
-    rec.lobbies[c] = {
-      host: myId, created: Date.now(), matchId: '', started: 0,
-      players: [{
-        id: myId, name: name, team: tm, tankId: eqT,
-        x: WW/2, y: WH/2, ang: 0, hp: 100, score: 0, wave: 1,
-        lastSeen: Date.now()
-      }]
-    };
-    await JSONBIN.writeAll(rec);
-    code = c;
+    let newCode = '';
+    await Cloud.update(rec => {
+      prune(rec);
+      do { newCode = genCode(); } while(rec.lobbies[newCode]);
+      rec.lobbies[newCode] = {
+        host: myId, created: Date.now(), matchId: '', started: 0,
+        players: [{
+          id: myId, name: name, team: tm, tankId: eqT,
+          x: WW/2, y: WH/2, ang: 0, hp: 100, score: 0, wave: 1,
+          lastSeen: Date.now()
+        }]
+      };
+    });
+    code = newCode;
     isHost = true;
     hostId = myId;
     matchId = '';
-    players = rec.lobbies[c].players;
-    return c;
+    players = [{ id: myId, name: name, team: tm, tankId: eqT,
+      x: WW/2, y: WH/2, ang: 0, hp: 100, score: 0, wave: 1, lastSeen: Date.now() }];
+    return code;
   }
   async function join(codeIn, name, tm){
     const c = String(codeIn).trim().toUpperCase();
-    const rec = await JSONBIN.readAll();
-    prune(rec);
-    const lob = rec.lobbies[c];
-    if(!lob) throw new Error('Lobby not found or expired');
-    const now = Date.now();
-    let me = lob.players.find(p => p.id === myId);
-    if(me){
-      me.name = name; me.team = tm; me.tankId = eqT; me.lastSeen = now;
-    } else {
-      if(lob.players.length >= 8) throw new Error('Lobby is full (8 max)');
-      lob.players.push({
-        id: myId, name: name, team: tm, tankId: eqT,
-        x: WW/2, y: WH/2, ang: 0, hp: 100, score: 0, wave: 1, lastSeen: now
-      });
-    }
-    await JSONBIN.writeAll(rec);
+    let result = null;
+    await Cloud.update(rec => {
+      prune(rec);
+      const lob = rec.lobbies[c];
+      if(!lob) throw new Error('Lobby not found or expired');
+      const now = Date.now();
+      let me = lob.players.find(p => p.id === myId);
+      if(me){
+        me.name = name; me.team = tm; me.tankId = eqT; me.lastSeen = now;
+      } else {
+        if(lob.players.length >= 8) throw new Error('Lobby is full (8 max)');
+        lob.players.push({
+          id: myId, name: name, team: tm, tankId: eqT,
+          x: WW/2, y: WH/2, ang: 0, hp: 100, score: 0, wave: 1, lastSeen: now
+        });
+      }
+      result = lob;
+    });
     code = c;
-    hostId = lob.host;
+    hostId = result.host;
     isHost = hostId === myId;
-    matchId = lob.matchId || '';
-    players = lob.players;
-    return lob;
+    matchId = result.matchId || '';
+    players = result.players;
+    return result;
   }
   async function heartbeat(stateObj){
-    const rec = await JSONBIN.readAll();
-    prune(rec);
-    const lob = rec.lobbies[code];
-    if(!lob) throw new Error('Lobby closed');
-    let me = lob.players.find(p => p.id === myId);
-    if(!me){
-      me = { id: myId, name: getPlayerName() || 'Player', team: team, tankId: eqT, lastSeen: Date.now() };
-      lob.players.push(me);
-    }
-    Object.assign(me, stateObj || {}, { lastSeen: Date.now(), tankId: eqT, team: team });
-    await JSONBIN.writeAll(rec);
-    hostId = lob.host;
+    let result = null;
+    await Cloud.update(rec => {
+      prune(rec);
+      const lob = rec.lobbies[code];
+      if(!lob) throw new Error('Lobby closed');
+      let me = lob.players.find(p => p.id === myId);
+      if(!me){
+        me = { id: myId, name: getPlayerName() || 'Player', team: team, tankId: eqT, lastSeen: Date.now() };
+        lob.players.push(me);
+      }
+      Object.assign(me, stateObj || {}, { lastSeen: Date.now(), tankId: eqT, team: team });
+      result = lob;
+    });
+    hostId = result.host;
     isHost = hostId === myId;
-    players = lob.players;
-    return lob;
+    players = result.players;
+    return result;
   }
   async function poll(){
-    const rec = await JSONBIN.readAll();
+    const rec = await Cloud.readAll(true);
     prune(rec);
     const lob = rec.lobbies[code];
     if(!lob) throw new Error('Lobby closed');
@@ -681,30 +633,32 @@ const Lobby = (() => {
     return lob;
   }
   async function startMatch(){
-    const rec = await JSONBIN.readAll();
-    const lob = rec.lobbies[code];
-    if(!lob || lob.host !== myId) throw new Error('Only host can start');
-    lob.matchId = Date.now().toString(36);
-    lob.started = Date.now();
-    for(const p of lob.players){
-      p.score = 0; p.wave = 1; p.hp = 100; p.lastSeen = Date.now();
-      p.x = WW/2; p.y = WH/2;
-    }
-    await JSONBIN.writeAll(rec);
-    matchId = lob.matchId;
-    players = lob.players;
-    return lob;
+    let result = null;
+    await Cloud.update(rec => {
+      const lob = rec.lobbies[code];
+      if(!lob || lob.host !== myId) throw new Error('Only host can start');
+      lob.matchId = Date.now().toString(36);
+      lob.started = Date.now();
+      for(const p of lob.players){
+        p.score = 0; p.wave = 1; p.hp = 100; p.lastSeen = Date.now();
+        p.x = WW/2; p.y = WH/2;
+      }
+      result = lob;
+    });
+    matchId = result.matchId;
+    players = result.players;
+    return result;
   }
   async function leave(){
+    if(!code) return;
     try {
-      const rec = await JSONBIN.readAll();
-      const lob = rec.lobbies[code];
-      if(lob){
+      await Cloud.update(rec => {
+        const lob = rec.lobbies[code];
+        if(!lob) return;
         lob.players = (lob.players || []).filter(p => p.id !== myId);
         if(!lob.players.length) delete rec.lobbies[code];
         else if(lob.host === myId) lob.host = lob.players[0].id;
-        await JSONBIN.writeAll(rec);
-      }
+      });
     } catch(e){}
     code = ''; isHost = false; players = []; matchId = ''; hostId = '';
   }
@@ -1379,8 +1333,7 @@ function reset(){
 }
 function start(){
   Board.refresh();
-  // Try a fresh pull from the cloud (non-blocking)
-  if(JSONBIN.hasKey()) Board.syncCloud();
+  Board.syncCloud();
   initAudio();
   if(!ensureName()) return;
   if(Daily.date !== today()) loadDaily();
@@ -1406,24 +1359,6 @@ function togglePause(){
   if(state === 'play') state = 'pause';
   else if(state === 'pause'){ state = 'play'; last = performance.now(); }
 }
-function askForJsonbinKey(){
-  let k = null;
-  try {
-    k = prompt(
-      'Paste your JSONBin.io Master Key.\n' +
-      'Get one free at jsonbin.io → API Keys.\n' +
-      'Saved only on this device. Everyone playing together must use the same key.',
-      JSONBIN.masterKey || '');
-  } catch(e){}
-  if(!k) return;
-  JSONBIN.setKey(k);
-  JSONBIN.resetKeys.call ? null : null;
-  // clear old bin so we re-create with new key
-  try { localStorage.removeItem('holdout_jsonbin_bin'); } catch(e){}
-  // Reset internal binId by re-setting via setKey path — readAll will create a new one.
-  Board.syncCloud();
-  alert('Key saved. Syncing scores from cloud…');
-}
 
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
@@ -1445,7 +1380,6 @@ addEventListener('keydown', e => {
       else if(k === 'v') toggleMode();
       else if(k === 'c') createLobby();
       else if(k === 'j') joinLobbyPrompt();
-      else if(k === 'y'){ if(confirm('Reset JSONBin key/bin on this device?')){ JSONBIN.resetKeys(); Board.syncCloud(); } }
     } else if(state === 'quests'){
       if(k === 'b' || k === 'escape' || k === 'q') state = 'menu';
       else if(k >= '1' && k <= '6') claimQuest(+k - 1);
@@ -1462,7 +1396,6 @@ addEventListener('keydown', e => {
     } else if(state === 'board'){
       if(k === 'b' || k === 'escape' || k === 'l') state = 'menu';
       else if(k === 'r'){ Board.syncCloud(); }
-      else if(k === 'k') askForJsonbinKey();
     } else if(state === 'garage'){
       if(k >= '1' && k <= '8') equipTank(+k - 1);
       else if(k === 'b' || k === 'escape' || k === 'g') state = 'menu';
@@ -1471,8 +1404,6 @@ addEventListener('keydown', e => {
       else if(k === 'r'){ pollLobby(); lobbyMsg = 'Refreshing...'; lobbyMsgT = 1; }
       else if(k === 'c' && !Lobby.code) createLobby();
       else if(k === 'j' && !Lobby.code) joinLobbyPrompt();
-      else if(k === 'k') askForJsonbinKey();
-      else if(k === 'y'){ if(confirm('Reset JSONBin key/bin?')){ JSONBIN.resetKeys(); lobbyMsg = 'Key reset'; lobbyMsgT = 2; } }
       else if(k === 'enter'){
         if(Lobby.isHost){
           Lobby.startMatch().then(()=>pollLobby()).catch(err => { lobbyMsg = err.message; lobbyMsgT = 2; });
@@ -1508,9 +1439,8 @@ cv.addEventListener('pointerdown', e => {
   const sp = pos(e);
   if(state === 'store'){ storeClick(sp); return; }
   if(state === 'board'){
-    if(sp.x > 720 && sp.x < 900 && sp.y > 20 && sp.y < 60){ Board.syncCloud(); return; }
-    if(sp.x > 20 && sp.x < 130 && sp.y < 64){ state = 'menu'; return; }
     if(sp.x > 700 && sp.x < 900 && sp.y > 20 && sp.y < 60){ Board.syncCloud(); return; }
+    if(sp.x > 20 && sp.x < 130 && sp.y < 64){ state = 'menu'; return; }
     state = 'menu'; return;
   }
   if(state === 'garage'){ garageClick(sp); return; }
@@ -1611,7 +1541,7 @@ function update(dt){
   if(Lobby.code){
     lobbySyncT -= dt;
     if(lobbySyncT <= 0 && !lobbySyncing){
-      lobbySyncT = 2.0;
+      lobbySyncT = 3.0;
       lobbySyncing = true;
       Lobby.heartbeat({ x:P.x, y:P.y, ang:P.ang, hp:P.hp, score:score, wave:wave })
         .then(() => { applyLobbyToGhosts(); })
@@ -2510,24 +2440,16 @@ function drawGarage(){
 function drawBoardScreen(){
   dim(0.7);
   txt('Top scores', W / 2, 60, 48, '#6ff2d6', 'center');
-  // cloud setup status
-  if(JSONBIN.hasKey()){
-    txt('Cloud leaderboard · shared with everyone using your JSONBin key',
-        W / 2, 82, 15, '#6ff2d6', 'center', 500);
-  } else {
-    txt('Cloud leaderboard is off — press K to set up a JSONBin key, or R to retry',
-        W / 2, 82, 15, '#ffe27a', 'center', 500);
-  }
+  txt('Cloud leaderboard · synced from JSONBin', W / 2, 82, 15, '#6ff2d6', 'center', 500);
   if(Board.status === 'error'){
     txt('Last sync error: ' + (Board.lastError || 'unknown'), W / 2, 100, 13, '#ff6b6b', 'center', 500);
   }
   Board.draw(120, 15);
-  // buttons
   navBtn(20, 'Back (B)');
-  rr(720, 20, 220, 36, 8);
+  rr(700, 20, 240, 36, 8);
   ctx.fillStyle = 'rgba(111,242,214,.18)'; ctx.fill();
   ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
-  txt('Refresh (R) · Set Key (K)', 830, 43, 15, '#6ff2d6', 'center');
+  txt('Refresh (R)', 820, 43, 17, '#6ff2d6', 'center');
   txt('Click or press B to go back', W / 2, 610, 20, '#9aa0d6', 'center', 500);
 }
 function questsClick(p){
@@ -2602,7 +2524,7 @@ function drawLobby(){
   dim(0.68);
   txt('PvP Lobby', W / 2, 72, 56, '#6ff2d6', 'center');
   if(!Lobby.code){
-    txt('Online via JSONBin.io · 2 or more players', W / 2, 120, 20, '#9aa0d6', 'center', 500);
+    txt('Cloud lobbies via JSONBin', W / 2, 120, 20, '#9aa0d6', 'center', 500);
     rr(280, 160, 400, 80, 12);
     ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fill();
     ctx.strokeStyle = '#6ff2d6'; ctx.lineWidth = 2; ctx.stroke();
@@ -2615,10 +2537,8 @@ function drawLobby(){
     txt('Ask your friend for their code', W / 2, 334, 18, '#9aa0d6', 'center', 500);
     txt('Your name: ' + (getPlayerName() || '(asked when you start)'), W / 2, 400, 22, '#c9cdf5', 'center', 500);
     txt('Your team: ' + teamName() + '  (T to change)', W / 2, 426, 22, teamCol(), 'center', 500);
-    txt('JSONBin key on this device: ' + (JSONBIN.hasKey() ? 'set' : 'not set'), W / 2, 466, 16, '#9aa0d6', 'center', 500);
-    txt('Press K to enter/change the master key · Y to reset', W / 2, 486, 14, '#9aa0d6', 'center', 500);
     navBtn(20, 'Back (B)');
-    txt('Everyone in a lobby must use the same JSONBin master key', W / 2, 620, 16, '#9aa0d6', 'center', 500);
+    txt('Everyone joins through the same shared bin', W / 2, 620, 16, '#9aa0d6', 'center', 500);
     if(lobbyMsgT > 0){
       ctx.globalAlpha = clamp(lobbyMsgT, 0, 1);
       txt(lobbyMsg, W / 2, 540, 22, '#ffe27a', 'center');
@@ -2732,14 +2652,8 @@ function frame(now){
 /* ================= BOOT ================= */
 reset();
 requestAnimationFrame(frame);
-
-// If a JSONBin key is already saved, warm up the cloud leaderboard on boot (silent)
-if(JSONBIN.hasKey()){
-  // ensure bin exists, then pull scores
-  JSONBIN.ensureSetup(true)
-    .then(() => Board.syncCloud())
-    .catch(e => { console.warn('Cloud boot sync skipped:', e.message); });
-}
+// Warm up the cloud board on boot
+Board.syncCloud();
 })();
 </script>
 </body>
